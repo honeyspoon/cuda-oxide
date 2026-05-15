@@ -26,6 +26,7 @@ pub mod tcgen05;
 pub mod thread;
 pub mod tma;
 pub mod warp;
+pub mod wmma;
 pub mod wgmma;
 
 pub use barrier::{

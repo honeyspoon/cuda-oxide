@@ -107,6 +107,7 @@ mod thread;
 mod tma;
 mod warp;
 mod wgmma;
+mod wmma;
 
 use pliron::context::Context;
 
@@ -123,6 +124,7 @@ pub use thread::*;
 pub use tma::*;
 pub use warp::*;
 pub use wgmma::*;
+pub use wmma::*;
 
 /// Register all NVVM dialect operations with the context.
 ///
@@ -138,6 +140,7 @@ pub fn register(ctx: &mut Context) {
     mbarrier::register(ctx);
     tma::register(ctx);
     wgmma::register(ctx);
+    wmma::register(ctx);
     tcgen05::register(ctx);
     stmatrix::register(ctx);
     debug::register(ctx);
