@@ -102,6 +102,7 @@ mod debug;
 mod grid;
 mod mbarrier;
 mod stmatrix;
+mod cp_async;
 mod tcgen05;
 mod thread;
 mod tma;
@@ -118,6 +119,7 @@ pub use debug::*;
 pub use grid::*;
 pub use mbarrier::*;
 pub use stmatrix::*;
+pub use cp_async::*;
 pub use tcgen05::*;
 pub use thread::*;
 pub use tma::*;
@@ -140,5 +142,6 @@ pub fn register(ctx: &mut Context) {
     wgmma::register(ctx);
     tcgen05::register(ctx);
     stmatrix::register(ctx);
+    cp_async::register(ctx);
     debug::register(ctx);
 }

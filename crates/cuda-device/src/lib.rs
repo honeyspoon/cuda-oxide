@@ -10,6 +10,7 @@ pub use cuda_macros::{
     readonly,
 };
 
+pub mod async_copy;
 // Re-export for convenience
 pub mod atomic;
 pub mod barrier;
