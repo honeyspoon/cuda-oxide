@@ -3003,6 +3003,11 @@ fn try_dispatch_intrinsic(
                 ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
             )?))
         }
+        "cuda_device::wmma::fused_k_step_4x" => {
+            Ok(Some(intrinsics::wmma::emit_wmma_fused_k_step_4x(
+                ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+            )?))
+        }
         // =================================================================
         // TMA (from intrinsics::tma)
         // =================================================================
