@@ -867,11 +867,7 @@ impl<'a> ModuleExportState<'a> {
         } else {
             " sideeffect"
         };
-        write!(
-            output,
-            " asm{se} \"{asm_template}\", \"{constraints}\"("
-        )
-        .unwrap();
+        write!(output, " asm{se} \"{asm_template}\", \"{constraints}\"(").unwrap();
         for (i, arg) in op_ref.operands().enumerate() {
             if i > 0 {
                 write!(output, ", ").unwrap();

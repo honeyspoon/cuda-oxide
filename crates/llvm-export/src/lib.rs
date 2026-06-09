@@ -137,6 +137,7 @@ pub mod ops {
     /// `ConstantOp` moved from the LLVM dialect to pliron core `builtin`.
     pub use pliron::builtin::ops::ConstantOp;
 
+    use pliron::builtin::attributes::BoolAttr;
     use pliron::{
         context::{Context, Ptr},
         identifier::Identifier,
@@ -145,7 +146,6 @@ pub mod ops {
         r#type::TypeObj,
         value::Value,
     };
-    use pliron::builtin::attributes::BoolAttr;
     use pliron_llvm::attributes::AlignmentAttr;
     pub use pliron_llvm::ops::{GlobalOp, InlineAsmOp};
 
@@ -199,10 +199,8 @@ pub mod ops {
             asm_template: &str,
             constraints: &str,
         ) -> Self {
-            let op =
-                InlineAsmOp::new(ctx, result_ty, inputs, asm_template, constraints, false);
-            let key =
-                Identifier::try_new(PURE_ASM_KEY.to_string()).expect("valid identifier");
+            let op = InlineAsmOp::new(ctx, result_ty, inputs, asm_template, constraints, false);
+            let key = Identifier::try_new(PURE_ASM_KEY.to_string()).expect("valid identifier");
             op.get_operation()
                 .deref_mut(ctx)
                 .attributes
@@ -308,4 +306,33 @@ pub fn fp16_attr_from_bits(bits: u16) -> FPHalfAttr {
 /// Extract the raw 16-bit IEEE half pattern from an `FPHalfAttr`.
 pub fn fp16_attr_to_bits(attr: &FPHalfAttr) -> u16 {
     attr.0.to_bits() as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ops::{InlineAsmOp, InlineAsmOpExt, is_pure_asm};
+    use super::types::VoidType;
+    use pliron::context::Context;
+
+    #[test]
+    fn test_new_pure_sets_pure_asm_attribute() {
+        let mut ctx = Context::new();
+        let void_ty = VoidType::get(&ctx);
+        let asm = InlineAsmOp::new_pure(&mut ctx, void_ty.into(), vec![], "nop;", "");
+        assert!(
+            is_pure_asm(&ctx, &asm),
+            "InlineAsmOp built with new_pure() should report is_pure_asm() == true"
+        );
+    }
+
+    #[test]
+    fn test_new_convergent_is_not_pure() {
+        let mut ctx = Context::new();
+        let void_ty = VoidType::get(&ctx);
+        let asm = InlineAsmOp::new_convergent(&mut ctx, void_ty.into(), vec![], "bar.sync 0;", "");
+        assert!(
+            !is_pure_asm(&ctx, &asm),
+            "InlineAsmOp built with new_convergent() should report is_pure_asm() == false"
+        );
+    }
 }
