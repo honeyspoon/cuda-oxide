@@ -1449,3 +1449,36 @@ fn test_ldmatrix_x2_trans_lowers_to_inline_asm() -> Result<(), anyhow::Error> {
 
     assert_inline_asm_lowering(&mut ctx, module_ptr, "ldmatrix.sync.aligned.m8n8.x2.trans")
 }
+
+// ---------------------------------------------------------------------------
+// mma.sync intrinsic lowering tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_mma_m16n8k16_f32_f16_lowers_to_inline_asm() -> Result<(), anyhow::Error> {
+    use dialect_mir::types::MirPtrType;
+    use pliron::builtin::types::{IntegerType, Signedness};
+
+    let mut ctx = make_test_ctx();
+    let i8_ty = IntegerType::get(&mut ctx, 8, Signedness::Signless);
+    let ptr_ty = MirPtrType::get_generic(&mut ctx, i8_ty.into(), true);
+    let (module_ptr, entry) =
+        build_test_kernel(&mut ctx, vec![ptr_ty.into(), ptr_ty.into(), ptr_ty.into()]);
+
+    let acc_ptr = entry.deref(&ctx).get_argument(0);
+    let a_ptr = entry.deref(&ctx).get_argument(1);
+    let b_ptr = entry.deref(&ctx).get_argument(2);
+
+    let op = Operation::new(
+        &mut ctx,
+        nvvm::MmaM16N8K16F32F16Op::get_concrete_op_info(),
+        vec![],
+        vec![acc_ptr, a_ptr, b_ptr],
+        vec![],
+        0,
+    );
+    op.insert_at_back(entry, &ctx);
+    append_return(&mut ctx, entry);
+
+    assert_inline_asm_lowering(&mut ctx, module_ptr, "mma.sync.aligned.m16n8k16")
+}
