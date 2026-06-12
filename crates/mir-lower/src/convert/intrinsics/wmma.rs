@@ -134,10 +134,10 @@ pub(crate) fn convert_ldmatrix_x2_trans(
 
 /// Convert mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
 ///
-/// Operands: [acc_ptr, a_ptr, b_ptr]
-/// - acc_ptr: pointer to [f32; 4] (read-modify-write)
-/// - a_ptr:   pointer to [u32; 4] (A fragment)
-/// - b_ptr:   pointer to [u32; 2] (B fragment)
+/// Operands: `[acc_ptr, a_ptr, b_ptr]`
+/// - acc_ptr: pointer to `[f32; 4]` (read-modify-write)
+/// - a_ptr:   pointer to `[u32; 4]` (A fragment)
+/// - b_ptr:   pointer to `[u32; 2]` (B fragment)
 ///
 /// The lowering loads the fragments from pointers into PTX registers,
 /// executes the mma.sync instruction, and stores results back.

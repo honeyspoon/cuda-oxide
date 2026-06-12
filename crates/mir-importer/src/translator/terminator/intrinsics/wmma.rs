@@ -220,9 +220,9 @@ pub fn emit_ldmatrix_x2_trans(
 /// Emit mma_m16n8k16_f32_f16: Warp MMA with f32 accumulator and f16 inputs.
 ///
 /// Args:
-/// - args[0]: &mut [f32; 4] (accumulator pointer, read-modify-write)
-/// - args[1]: &[u32; 4] (A fragment pointer)
-/// - args[2]: &[u32; 2] (B fragment pointer)
+/// - `args[0]`: `&mut [f32; 4]` (accumulator pointer, read-modify-write)
+/// - `args[1]`: `&[u32; 4]` (A fragment pointer)
+/// - `args[2]`: `&[u32; 2]` (B fragment pointer)
 ///
 /// Returns: void (accumulator updated in-place)
 pub fn emit_mma_m16n8k16_f32_f16(

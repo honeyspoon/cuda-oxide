@@ -211,6 +211,8 @@ pub unsafe fn ldmatrix_x2_trans(smem_ptr: *const u32) -> [u32; 2] {
 ///     unsafe { mma_m16n8k16_f32_f16(&mut acc, &a, &b); }
 /// }
 /// ```
+///
+/// See also: [`ldmatrix_x4`], [`ldmatrix_x2_trans`]
 #[inline(never)]
 pub unsafe fn mma_m16n8k16_f32_f16(acc: &mut [f32; 4], a: &[u32; 4], b: &[u32; 2]) {
     let _ = (acc, a, b);

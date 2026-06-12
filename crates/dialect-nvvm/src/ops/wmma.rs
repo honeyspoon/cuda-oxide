@@ -39,7 +39,7 @@ use pliron_derive::pliron_op;
 /// - `smem_ptr` (ptr): pointer to shared memory
 ///
 /// # Results
-/// - `result` (ptr): pointer to output array [u32; 4]
+/// - `result` (ptr): pointer to output array `[u32; 4]`
 #[pliron_op(
     name = "nvvm.ldmatrix_x4",
     format,
@@ -62,7 +62,7 @@ impl LdmatrixX4Op {
 /// - `smem_ptr` (ptr): pointer to shared memory
 ///
 /// # Results
-/// - `result` (ptr): pointer to output array [u32; 2]
+/// - `result` (ptr): pointer to output array `[u32; 2]`
 #[pliron_op(
     name = "nvvm.ldmatrix_x2",
     format,
@@ -124,9 +124,9 @@ impl LdmatrixX2TransOp {
 ///
 /// # Operands
 ///
-/// - `acc_ptr` (ptr): pointer to [f32; 4] accumulator (read-modify-write)
-/// - `a_ptr` (ptr): pointer to [u32; 4] A fragment
-/// - `b_ptr` (ptr): pointer to [u32; 2] B fragment
+/// - `acc_ptr` (ptr): pointer to `[f32; 4]` accumulator (read-modify-write)
+/// - `a_ptr` (ptr): pointer to `[u32; 4]` A fragment
+/// - `b_ptr` (ptr): pointer to `[u32; 2]` B fragment
 ///
 /// # Results
 ///
