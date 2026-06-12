@@ -848,6 +848,7 @@ impl<'a> ModuleExportState<'a> {
         let asm_template = read_string_attr(op.get_attr_inline_asm_template(self.ctx));
         let constraints = read_string_attr(op.get_attr_inline_asm_constraints(self.ctx));
         let is_convergent = read_bool_attr(op.get_attr_inline_asm_convergent(self.ctx));
+        let side_effects = ops::has_side_effects(self.ctx, op.get_operation());
 
         // pliron-llvm always stores a single result slot (a void result for
         // no-value asm), so decide void vs valued by the result *type*, not the
@@ -862,11 +863,8 @@ impl<'a> ModuleExportState<'a> {
             self.export_type(res_ty, output)?;
         }
 
-        write!(
-            output,
-            " asm sideeffect \"{asm_template}\", \"{constraints}\"("
-        )
-        .unwrap();
+        let se = if side_effects { " sideeffect" } else { "" };
+        write!(output, " asm{se} \"{asm_template}\", \"{constraints}\"(").unwrap();
         for (i, arg) in op_ref.operands().enumerate() {
             if i > 0 {
                 write!(output, ", ").unwrap();

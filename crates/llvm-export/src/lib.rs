@@ -138,6 +138,7 @@ pub mod ops {
     pub use pliron::builtin::ops::ConstantOp;
 
     use pliron::{
+        builtin::attributes::BoolAttr,
         context::{Context, Ptr},
         identifier::Identifier,
         op::Op,
@@ -148,13 +149,42 @@ pub mod ops {
     use pliron_llvm::attributes::AlignmentAttr;
     pub use pliron_llvm::ops::{GlobalOp, InlineAsmOp};
 
-    /// Convergent inline-asm constructor re-homed from the pre-migration local
-    /// op. Upstream `InlineAsmOp::new` takes a trailing `convergent: bool`;
-    /// this keeps the `new_convergent(...)` call shape used across mir-lower.
+    /// Op-attribute key recording whether an `InlineAsmOp` has side effects.
+    /// When `true` (the default for backward compatibility) the exporter emits
+    /// the LLVM `sideeffect` keyword; when `false` LLVM is free to optimise
+    /// the asm away if the result is unused.
+    const SIDE_EFFECTS_KEY: &str = "cuda_oxide_has_side_effects";
+
+    /// Named constructors and the side-effects query for `InlineAsmOp`.
+    ///
+    /// Upstream `InlineAsmOp::new` takes a trailing `convergent: bool` but has
+    /// no notion of side effects. We stamp a `BoolAttr` onto the op so the
+    /// exporter can decide whether to emit `sideeffect`.
     pub trait InlineAsmOpExt {
-        /// Build a convergent `InlineAsmOp` (use a void result type for asm
-        /// with no result value).
+        /// Build a **convergent** `InlineAsmOp` that **has side effects**
+        /// (the common case for GPU barrier / collective asm).
         fn new_convergent(
+            ctx: &mut Context,
+            result_ty: Ptr<TypeObj>,
+            inputs: Vec<Value>,
+            asm_template: &str,
+            constraints: &str,
+        ) -> Self;
+
+        /// Build a **non-convergent, pure** `InlineAsmOp` (no side effects).
+        /// Use this for data-conversion asm such as `cvt.rn.f16x2.f32`.
+        fn new_pure(
+            ctx: &mut Context,
+            result_ty: Ptr<TypeObj>,
+            inputs: Vec<Value>,
+            asm_template: &str,
+            constraints: &str,
+        ) -> Self;
+
+        /// Build a **non-convergent** `InlineAsmOp` that **has side effects**.
+        /// Use this for asm that writes memory or has observable effects but is
+        /// not a convergent collective.
+        fn new_side_effect(
             ctx: &mut Context,
             result_ty: Ptr<TypeObj>,
             inputs: Vec<Value>,
@@ -171,8 +201,53 @@ pub mod ops {
             asm_template: &str,
             constraints: &str,
         ) -> Self {
-            InlineAsmOp::new(ctx, result_ty, inputs, asm_template, constraints, true)
+            let op = InlineAsmOp::new(ctx, result_ty, inputs, asm_template, constraints, true);
+            set_side_effects(ctx, op.get_operation(), true);
+            op
         }
+
+        fn new_pure(
+            ctx: &mut Context,
+            result_ty: Ptr<TypeObj>,
+            inputs: Vec<Value>,
+            asm_template: &str,
+            constraints: &str,
+        ) -> Self {
+            let op = InlineAsmOp::new(ctx, result_ty, inputs, asm_template, constraints, false);
+            set_side_effects(ctx, op.get_operation(), false);
+            op
+        }
+
+        fn new_side_effect(
+            ctx: &mut Context,
+            result_ty: Ptr<TypeObj>,
+            inputs: Vec<Value>,
+            asm_template: &str,
+            constraints: &str,
+        ) -> Self {
+            let op = InlineAsmOp::new(ctx, result_ty, inputs, asm_template, constraints, false);
+            set_side_effects(ctx, op.get_operation(), true);
+            op
+        }
+    }
+
+    /// Stamp the `has_side_effects` attribute onto an inline-asm operation.
+    fn set_side_effects(ctx: &mut Context, op: Ptr<Operation>, has: bool) {
+        let key = Identifier::try_new(SIDE_EFFECTS_KEY.to_string()).expect("valid identifier");
+        op.deref_mut(ctx).attributes.set(key, BoolAttr::new(has));
+    }
+
+    /// Query whether an `InlineAsmOp` has side effects.
+    ///
+    /// Returns `true` when the attribute is absent (backward-compatible
+    /// default: treat unmarked asm as side-effecting).
+    pub fn has_side_effects(ctx: &Context, op: Ptr<Operation>) -> bool {
+        let key = Identifier::try_new(SIDE_EFFECTS_KEY.to_string()).expect("valid identifier");
+        op.deref(ctx)
+            .attributes
+            .get::<BoolAttr>(&key)
+            .map(|b| bool::from(b.clone()))
+            .unwrap_or(true)
     }
 
     /// Op-attribute key for a `GlobalOp`'s explicit alignment.
