@@ -62,7 +62,7 @@ fn convert_cp_async_16_impl(
     Ok(())
 }
 
-/// Convert `cp.async.cg.shared.global` — 16-byte async copy, L2-only cache policy.
+/// Convert `cp.async.cg.shared.global`, 16-byte async copy, L2-only cache policy.
 pub(crate) fn convert_cp_async_cg_16(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -72,7 +72,7 @@ pub(crate) fn convert_cp_async_cg_16(
     convert_cp_async_16_impl(ctx, rewriter, op, "cg")
 }
 
-/// Convert `cp.async.ca.shared.global` — 16-byte async copy, L1+L2 cache policy.
+/// Convert `cp.async.ca.shared.global`, 16-byte async copy, L1+L2 cache policy.
 pub(crate) fn convert_cp_async_ca_16(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -82,7 +82,7 @@ pub(crate) fn convert_cp_async_ca_16(
     convert_cp_async_16_impl(ctx, rewriter, op, "ca")
 }
 
-/// Convert `cp.async.commit_group` — commit all prior cp.async into a group.
+/// Convert `cp.async.commit_group`, commit all prior cp.async into a group.
 pub(crate) fn convert_cp_async_commit_group(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -102,7 +102,7 @@ pub(crate) fn convert_cp_async_commit_group(
     Ok(())
 }
 
-/// Convert `cp.async.wait_group N` — wait for groups.
+/// Convert `cp.async.wait_group N`, wait for groups.
 ///
 /// N is stored as the `wait_n` attribute on the operation.
 pub(crate) fn convert_cp_async_wait_group(
@@ -123,7 +123,7 @@ pub(crate) fn convert_cp_async_wait_group(
     Ok(())
 }
 
-/// Convert `cp.async.wait_all` — wait for all outstanding groups.
+/// Convert `cp.async.wait_all`, wait for all outstanding groups.
 pub(crate) fn convert_cp_async_wait_all(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,

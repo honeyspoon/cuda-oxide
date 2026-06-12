@@ -91,6 +91,8 @@ pub fn cp_async_ca_16(shared_dst: *mut u8, global_src: *const u8) {
 /// groups to complete while allowing later groups to remain in-flight.
 ///
 /// Maps to PTX: `cp.async.commit_group;`
+///
+/// See also: [`cp_async_wait_group`], [`cp_async_wait_all`]
 #[inline(never)]
 pub fn cp_async_commit_group() {
     unreachable!("cp_async_commit_group called outside CUDA kernel context")
@@ -102,6 +104,8 @@ pub fn cp_async_commit_group() {
 /// If N=1, waits until only the most recent group might still be in-flight.
 ///
 /// Maps to PTX: `cp.async.wait_group N;`
+///
+/// See also: [`cp_async_commit_group`], [`cp_async_wait_all`]
 #[inline(never)]
 pub fn cp_async_wait_group<const N: u32>() {
     unreachable!("cp_async_wait_group called outside CUDA kernel context")
@@ -112,6 +116,8 @@ pub fn cp_async_wait_group<const N: u32>() {
 /// Equivalent to `cp_async_wait_group::<0>()`.
 ///
 /// Maps to PTX: `cp.async.wait_all;`
+///
+/// See also: [`cp_async_commit_group`], [`cp_async_wait_group`]
 #[inline(never)]
 pub fn cp_async_wait_all() {
     unreachable!("cp_async_wait_all called outside CUDA kernel context")

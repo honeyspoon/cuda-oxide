@@ -977,12 +977,8 @@ fn translate_call(
                 use rustc_public::ty::TyConstKind;
 
                 let n_val = match c.kind() {
-                    TyConstKind::Value(_, alloc) => {
-                        alloc.read_uint().unwrap_or(0) as u32
-                    }
-                    _ => {
-                        c.eval_target_usize().unwrap_or(0) as u32
-                    }
+                    TyConstKind::Value(_, alloc) => alloc.read_uint().unwrap_or(0) as u32,
+                    _ => c.eval_target_usize().unwrap_or(0) as u32,
                 };
                 return intrinsics::cp_async::emit_cp_async_wait_group(
                     ctx,
@@ -2407,7 +2403,6 @@ fn try_dispatch_intrinsic(
                 ctx, args, target, block_ptr, prev_op, block_map, loc,
             )?))
         }
-
 
         // =================================================================
         // Async Copy (cp.async)

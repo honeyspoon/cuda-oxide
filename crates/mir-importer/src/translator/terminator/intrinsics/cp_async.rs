@@ -43,19 +43,28 @@ fn emit_cp_async_16_impl<T: Op>(
     if args.len() != 2 {
         return input_err!(
             loc.clone(),
-            TranslationErr::unsupported(format!(
-                "{name} expects 2 arguments, got {}",
-                args.len()
-            ))
+            TranslationErr::unsupported(format!("{name} expects 2 arguments, got {}", args.len()))
         );
     }
 
     let (shared_dst, mut last_op) = rvalue::translate_operand(
-        ctx, body, &args[0], value_map, block_ptr, prev_op, loc.clone(),
+        ctx,
+        body,
+        &args[0],
+        value_map,
+        block_ptr,
+        prev_op,
+        loc.clone(),
     )?;
 
     let (global_src, last_op_after) = rvalue::translate_operand(
-        ctx, body, &args[1], value_map, block_ptr, last_op, loc.clone(),
+        ctx,
+        body,
+        &args[1],
+        value_map,
+        block_ptr,
+        last_op,
+        loc.clone(),
     )?;
     last_op = last_op_after;
 
@@ -104,7 +113,15 @@ pub fn emit_cp_async_cg_16(
     loc: Location,
 ) -> TranslationResult<Ptr<Operation>> {
     emit_cp_async_16_impl::<CpAsyncCg16Op>(
-        ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
         "cp_async_cg_16",
     )
 }
@@ -126,7 +143,15 @@ pub fn emit_cp_async_ca_16(
     loc: Location,
 ) -> TranslationResult<Ptr<Operation>> {
     emit_cp_async_16_impl::<CpAsyncCa16Op>(
-        ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
         "cp_async_ca_16",
     )
 }
@@ -144,12 +169,20 @@ pub fn emit_cp_async_commit_group(
     loc: Location,
 ) -> TranslationResult<Ptr<Operation>> {
     emit_zero_arg_void_sync_op(
-        ctx, target, block_ptr, prev_op, block_map, loc,
+        ctx,
+        target,
+        block_ptr,
+        prev_op,
+        block_map,
+        loc,
         |ctx| {
             Operation::new(
                 ctx,
                 CpAsyncCommitGroupOp::get_concrete_op_info(),
-                vec![], vec![], vec![], 0,
+                vec![],
+                vec![],
+                vec![],
+                0,
             )
         },
         "cp_async_commit_group",
@@ -208,12 +241,20 @@ pub fn emit_cp_async_wait_all(
     loc: Location,
 ) -> TranslationResult<Ptr<Operation>> {
     emit_zero_arg_void_sync_op(
-        ctx, target, block_ptr, prev_op, block_map, loc,
+        ctx,
+        target,
+        block_ptr,
+        prev_op,
+        block_map,
+        loc,
         |ctx| {
             Operation::new(
                 ctx,
                 CpAsyncWaitAllOp::get_concrete_op_info(),
-                vec![], vec![], vec![], 0,
+                vec![],
+                vec![],
+                vec![],
+                0,
             )
         },
         "cp_async_wait_all",
