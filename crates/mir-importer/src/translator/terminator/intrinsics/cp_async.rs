@@ -40,19 +40,28 @@ fn emit_cp_async_16_impl<T: Op>(
     if args.len() != 2 {
         return input_err!(
             loc.clone(),
-            TranslationErr::unsupported(format!(
-                "{name} expects 2 arguments, got {}",
-                args.len()
-            ))
+            TranslationErr::unsupported(format!("{name} expects 2 arguments, got {}", args.len()))
         );
     }
 
     let (shared_dst, mut last_op) = rvalue::translate_operand(
-        ctx, body, &args[0], value_map, block_ptr, prev_op, loc.clone(),
+        ctx,
+        body,
+        &args[0],
+        value_map,
+        block_ptr,
+        prev_op,
+        loc.clone(),
     )?;
 
     let (global_src, last_op_after) = rvalue::translate_operand(
-        ctx, body, &args[1], value_map, block_ptr, last_op, loc.clone(),
+        ctx,
+        body,
+        &args[1],
+        value_map,
+        block_ptr,
+        last_op,
+        loc.clone(),
     )?;
     last_op = last_op_after;
 
@@ -87,8 +96,8 @@ fn emit_cp_async_16_impl<T: Op>(
 /// Uses `.cg` cache policy (L2-only, bypasses L1).
 ///
 /// Args:
-/// - args[0]: *mut u8 (shared memory destination, 16-byte aligned)
-/// - args[1]: *const u8 (global memory source, 16-byte aligned)
+/// - `args[0]`: `*mut u8` (shared memory destination, 16-byte aligned)
+/// - `args[1]`: `*const u8` (global memory source, 16-byte aligned)
 pub fn emit_cp_async_cg_16(
     ctx: &mut Context,
     body: &mir::Body,
@@ -101,7 +110,15 @@ pub fn emit_cp_async_cg_16(
     loc: Location,
 ) -> TranslationResult<Ptr<Operation>> {
     emit_cp_async_16_impl::<CpAsyncCg16Op>(
-        ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
         "cp_async_cg_16",
     )
 }
@@ -109,8 +126,8 @@ pub fn emit_cp_async_cg_16(
 /// Emit cp_async_ca_16: async 16-byte copy with `.ca` cache policy (L1+L2).
 ///
 /// Args:
-/// - args[0]: *mut u8 (shared memory destination, 16-byte aligned)
-/// - args[1]: *const u8 (global memory source, 16-byte aligned)
+/// - `args[0]`: `*mut u8` (shared memory destination, 16-byte aligned)
+/// - `args[1]`: `*const u8` (global memory source, 16-byte aligned)
 pub fn emit_cp_async_ca_16(
     ctx: &mut Context,
     body: &mir::Body,
@@ -123,7 +140,15 @@ pub fn emit_cp_async_ca_16(
     loc: Location,
 ) -> TranslationResult<Ptr<Operation>> {
     emit_cp_async_16_impl::<CpAsyncCa16Op>(
-        ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
         "cp_async_ca_16",
     )
 }

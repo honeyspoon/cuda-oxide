@@ -47,7 +47,14 @@ fn convert_cp_async_16_impl(
          cp.async.{cache_policy}.shared.global [%smem32], [$1], 16; \
          }}"
     );
-    inline_asm_convergent(ctx, rewriter, void_ty.into(), operands, &asm, "l,l,~{memory}");
+    inline_asm_convergent(
+        ctx,
+        rewriter,
+        void_ty.into(),
+        operands,
+        &asm,
+        "l,l,~{memory}",
+    );
     rewriter.erase_operation(ctx, op);
     Ok(())
 }
