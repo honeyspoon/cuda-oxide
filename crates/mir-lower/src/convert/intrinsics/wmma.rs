@@ -32,7 +32,7 @@ use pliron::result::Result;
 ///
 /// Note: `smem_ptr` is a generic-space pointer. The PTX uses `cvta.to.shared`
 /// to convert it (same pattern as stmatrix.rs). Do NOT use
-/// `cast_to_shared_addrspace` — that would double-convert.
+/// `cast_to_shared_addrspace`,that would double-convert.
 fn convert_ldmatrix_impl(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -91,7 +91,7 @@ fn convert_ldmatrix_impl(
     Ok(())
 }
 
-/// Convert `ldmatrix.sync.aligned.m8n8.x4.shared.b16` — load 4 × u32 from shared.
+/// Convert `ldmatrix.sync.aligned.m8n8.x4.shared.b16`,load 4 × u32 from shared.
 pub(crate) fn convert_ldmatrix_x4(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -101,7 +101,7 @@ pub(crate) fn convert_ldmatrix_x4(
     convert_ldmatrix_impl(ctx, rewriter, op, 4, false, "ldmatrix_x4")
 }
 
-/// Convert `ldmatrix.sync.aligned.m8n8.x2.shared.b16` — load 2 × u32 from shared.
+/// Convert `ldmatrix.sync.aligned.m8n8.x2.shared.b16`,load 2 × u32 from shared.
 pub(crate) fn convert_ldmatrix_x2(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -111,7 +111,7 @@ pub(crate) fn convert_ldmatrix_x2(
     convert_ldmatrix_impl(ctx, rewriter, op, 2, false, "ldmatrix_x2")
 }
 
-/// Convert `ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16` — load 4 × u32 transposed.
+/// Convert `ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16`,load 4 × u32 transposed.
 pub(crate) fn convert_ldmatrix_x4_trans(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -121,7 +121,7 @@ pub(crate) fn convert_ldmatrix_x4_trans(
     convert_ldmatrix_impl(ctx, rewriter, op, 4, true, "ldmatrix_x4_trans")
 }
 
-/// Convert `ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16` — load 2 × u32 transposed.
+/// Convert `ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16`,load 2 × u32 transposed.
 pub(crate) fn convert_ldmatrix_x2_trans(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -199,7 +199,7 @@ pub(crate) fn convert_mma_m16n8k16_f32_f16(
 
 /// Convert fused K-step: ldmatrix_x4(A) + 4×ldmatrix_x2_trans(B) + 4×mma.sync
 ///
-/// Operands: [a_smem, b_smem0, b_smem1, b_smem2, b_smem3, acc0, acc1, acc2, acc3]
+/// Operands: `[a_smem, b_smem0, b_smem1, b_smem2, b_smem3, acc0, acc1, acc2, acc3]`
 ///
 /// All pointer loads/stores and MMA operations are fused into a single inline
 /// asm block. The accumulator pointers are read-modify-write: the asm loads
@@ -214,9 +214,7 @@ pub(crate) fn convert_wmma_fused_k_step_4x(
     let void_ty = llvm_types::VoidType::get(ctx);
     let operands: Vec<_> = op.deref(ctx).operands().collect();
     if operands.len() < 9 {
-        return pliron::input_err_noloc!(
-            "wmma_fused_k_step_4x requires 9 operands"
-        );
+        return pliron::input_err_noloc!("wmma_fused_k_step_4x requires 9 operands");
     }
     let a_smem = operands[0];
     let b_smem0 = operands[1];
@@ -250,7 +248,6 @@ pub(crate) fn convert_wmma_fused_k_step_4x(
         ".reg .f32 d3_<4>; ",
         ".reg .u64 smem64; ",
         ".reg .u32 smem32; ",
-
         // Load accumulators from generic-space pointers
         "ld.f32 d0_0, [$5]; ",
         "ld.f32 d0_1, [$5+4]; ",
@@ -268,12 +265,10 @@ pub(crate) fn convert_wmma_fused_k_step_4x(
         "ld.f32 d3_1, [$8+4]; ",
         "ld.f32 d3_2, [$8+8]; ",
         "ld.f32 d3_3, [$8+12]; ",
-
         // ldmatrix_x4 for A tile ($0 = a_smem)
         "cvta.to.shared.u64 smem64, $0; ",
         "cvt.u32.u64 smem32, smem64; ",
         "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {a0, a1, a2, a3}, [smem32]; ",
-
         // B0 + mma0 ($1 = b_smem0, acc tile 0)
         "cvta.to.shared.u64 smem64, $1; ",
         "cvt.u32.u64 smem32, smem64; ",
@@ -283,7 +278,6 @@ pub(crate) fn convert_wmma_fused_k_step_4x(
         "{a0, a1, a2, a3}, ",
         "{b0, b1}, ",
         "{d0_0, d0_1, d0_2, d0_3}; ",
-
         // B1 + mma1 ($2 = b_smem1, acc tile 1)
         "cvta.to.shared.u64 smem64, $2; ",
         "cvt.u32.u64 smem32, smem64; ",
@@ -293,7 +287,6 @@ pub(crate) fn convert_wmma_fused_k_step_4x(
         "{a0, a1, a2, a3}, ",
         "{b0, b1}, ",
         "{d1_0, d1_1, d1_2, d1_3}; ",
-
         // B2 + mma2 ($3 = b_smem2, acc tile 2)
         "cvta.to.shared.u64 smem64, $3; ",
         "cvt.u32.u64 smem32, smem64; ",
@@ -303,7 +296,6 @@ pub(crate) fn convert_wmma_fused_k_step_4x(
         "{a0, a1, a2, a3}, ",
         "{b0, b1}, ",
         "{d2_0, d2_1, d2_2, d2_3}; ",
-
         // B3 + mma3 ($4 = b_smem3, acc tile 3)
         "cvta.to.shared.u64 smem64, $4; ",
         "cvt.u32.u64 smem32, smem64; ",
@@ -313,7 +305,6 @@ pub(crate) fn convert_wmma_fused_k_step_4x(
         "{a0, a1, a2, a3}, ",
         "{b0, b1}, ",
         "{d3_0, d3_1, d3_2, d3_3}; ",
-
         // Store accumulators back
         "st.f32 [$5], d0_0; ",
         "st.f32 [$5+4], d0_1; ",
@@ -338,8 +329,9 @@ pub(crate) fn convert_wmma_fused_k_step_4x(
         ctx,
         rewriter,
         void_ty.into(),
-        vec![a_smem, b_smem0, b_smem1, b_smem2, b_smem3,
-             acc0_ptr, acc1_ptr, acc2_ptr, acc3_ptr],
+        vec![
+            a_smem, b_smem0, b_smem1, b_smem2, b_smem3, acc0_ptr, acc1_ptr, acc2_ptr, acc3_ptr,
+        ],
         asm,
         "l,l,l,l,l,l,l,l,l,~{memory}",
     );

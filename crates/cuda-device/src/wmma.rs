@@ -228,13 +228,15 @@ pub unsafe fn mma_m16n8k16_f32_f16(acc: &mut [f32; 4], a: &[u32; 4], b: &[u32; 2
 ///
 /// - `a_smem_ptr`: shared memory pointer for A tile (from ldmatrix_x4 addressing)
 /// - `b_smem0..3`: shared memory pointers for 4 B column groups (from ldmatrix_x2_trans addressing)
-/// - `acc0..3`: mutable accumulators for 4 output column groups (4 × [f32; 4])
+/// - `acc0..3`: mutable accumulators for 4 output column groups (4 × `[f32; 4]`)
 ///
 /// # Safety
 ///
 /// - All smem pointers must point to valid shared memory with correct alignment
 /// - Must be called by all threads in a warp
 /// - Must be called from within a CUDA kernel context on sm_80+
+///
+/// See also: [`mma_m16n8k16_f32_f16`], [`ldmatrix_x4`], [`ldmatrix_x2_trans`]
 #[inline(never)]
 pub unsafe fn fused_k_step_4x(
     a_smem_ptr: *const u32,

@@ -154,7 +154,7 @@ impl MmaM16N8K16F32F16Op {
 ///
 /// - `a_smem_ptr` (ptr): shared memory for A tile
 /// - `b_smem0..3` (ptr): shared memory for 4 B column groups
-/// - `acc0..3` (ptr): pointers to [f32; 4] accumulators (read-modify-write)
+/// - `acc0..3` (ptr): pointers to `[f32; 4]` accumulators (read-modify-write)
 #[pliron_op(
     name = "nvvm.wmma_fused_k_step_4x",
     format,

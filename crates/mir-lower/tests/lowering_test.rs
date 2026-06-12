@@ -1499,9 +1499,7 @@ fn test_wmma_fused_k_step_4x_lowers_to_inline_asm() -> Result<(), anyhow::Error>
     let arg_tys = vec![ptr_ty.into(); 9];
     let (module_ptr, entry) = build_test_kernel(&mut ctx, arg_tys);
 
-    let args: Vec<_> = (0..9)
-        .map(|i| entry.deref(&ctx).get_argument(i))
-        .collect();
+    let args: Vec<_> = (0..9).map(|i| entry.deref(&ctx).get_argument(i)).collect();
 
     let op = Operation::new(
         &mut ctx,

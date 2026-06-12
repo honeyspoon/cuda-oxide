@@ -316,9 +316,9 @@ pub fn emit_mma_m16n8k16_f32_f16(
 /// Emit fused K-step: ldmatrix_x4(A) + 4×ldmatrix_x2_trans(B) + 4×mma.sync
 ///
 /// Args:
-/// - args[0]: *const u32 (A shared memory pointer)
-/// - args[1..5]: *const u32 (B shared memory pointers for 4 column groups)
-/// - args[5..9]: &mut [f32; 4] (4 accumulator pointers)
+/// - `args[0]`: *const u32 (A shared memory pointer)
+/// - `args[1..5]`: *const u32 (B shared memory pointers for 4 column groups)
+/// - `args[5..9]`: `&mut [f32; 4]` (4 accumulator pointers)
 pub fn emit_wmma_fused_k_step_4x(
     ctx: &mut Context,
     body: &mir::Body,
