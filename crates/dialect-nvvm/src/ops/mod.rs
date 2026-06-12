@@ -97,9 +97,9 @@
 
 pub mod atomic;
 mod clc;
-mod cp_async;
 mod cluster;
 mod convert;
+mod cp_async;
 mod debug;
 mod grid;
 mod mbarrier;
