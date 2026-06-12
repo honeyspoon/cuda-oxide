@@ -32,7 +32,7 @@ use pliron::result::Result;
 ///
 /// Note: `smem_ptr` is a generic-space pointer. The PTX uses `cvta.to.shared`
 /// to convert it (same pattern as stmatrix.rs). Do NOT use
-/// `cast_to_shared_addrspace` — that would double-convert.
+/// `cast_to_shared_addrspace`, that would double-convert.
 fn convert_ldmatrix_impl(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -79,12 +79,19 @@ fn convert_ldmatrix_impl(
          }}"
     );
 
-    inline_asm_convergent(ctx, rewriter, void_ty.into(), vec![dest_ptr, smem_ptr], &asm, "l,l");
+    inline_asm_convergent(
+        ctx,
+        rewriter,
+        void_ty.into(),
+        vec![dest_ptr, smem_ptr],
+        &asm,
+        "l,l",
+    );
     rewriter.erase_operation(ctx, op);
     Ok(())
 }
 
-/// Convert `ldmatrix.sync.aligned.m8n8.x4.shared.b16` — load 4 × u32 from shared.
+/// Convert `ldmatrix.sync.aligned.m8n8.x4.shared.b16`, load 4 x u32 from shared.
 pub(crate) fn convert_ldmatrix_x4(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -94,7 +101,7 @@ pub(crate) fn convert_ldmatrix_x4(
     convert_ldmatrix_impl(ctx, rewriter, op, 4, false, "ldmatrix_x4")
 }
 
-/// Convert `ldmatrix.sync.aligned.m8n8.x2.shared.b16` — load 2 × u32 from shared.
+/// Convert `ldmatrix.sync.aligned.m8n8.x2.shared.b16`, load 2 x u32 from shared.
 pub(crate) fn convert_ldmatrix_x2(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -104,7 +111,7 @@ pub(crate) fn convert_ldmatrix_x2(
     convert_ldmatrix_impl(ctx, rewriter, op, 2, false, "ldmatrix_x2")
 }
 
-/// Convert `ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16` — load 4 × u32 transposed.
+/// Convert `ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16`, load 4 x u32 transposed.
 pub(crate) fn convert_ldmatrix_x4_trans(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -114,7 +121,7 @@ pub(crate) fn convert_ldmatrix_x4_trans(
     convert_ldmatrix_impl(ctx, rewriter, op, 4, true, "ldmatrix_x4_trans")
 }
 
-/// Convert `ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16` — load 2 × u32 transposed.
+/// Convert `ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16`, load 2 x u32 transposed.
 pub(crate) fn convert_ldmatrix_x2_trans(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
