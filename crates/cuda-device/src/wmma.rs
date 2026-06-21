@@ -237,6 +237,7 @@ pub unsafe fn mma_m16n8k16_f32_f16(acc: &mut [f32; 4], a: &[u32; 4], b: &[u32; 2
 /// - Must be called from within a CUDA kernel context on sm_80+
 ///
 /// See also: [`mma_m16n8k16_f32_f16`], [`ldmatrix_x4`], [`ldmatrix_x2_trans`]
+#[allow(clippy::too_many_arguments)]
 #[inline(never)]
 pub unsafe fn fused_k_step_4x(
     a_smem_ptr: *const u32,

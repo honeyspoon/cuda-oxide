@@ -60,7 +60,7 @@ fn convert_ldmatrix_impl(
     let stores: String = (0..num_regs)
         .map(|i| {
             if i == 0 {
-                format!("st.b32 [$0], r0; ")
+                "st.b32 [$0], r0; ".to_string()
             } else {
                 format!("st.b32 [$0+{}], r{i}; ", i * 4)
             }
