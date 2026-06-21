@@ -70,7 +70,7 @@ use dialect_nvvm::ops::{
     Tcgen05RelinquishAllocPermitOp, Tcgen05StoreWaitOp, ThreadfenceBlockOp, ThreadfenceOp,
     ThreadfenceSystemOp, TrapOp, VoteSyncAllOp, VoteSyncAnyOp, VoteSyncBallotOp, VprintfOp,
     WgmmaCommitGroupSyncAlignedOp, WgmmaFenceSyncAlignedOp, WgmmaMakeSmemDescOp,
-    WgmmaMmaM64N64K16F32Bf16Op, WgmmaWaitGroupSyncAlignedOp,
+    WgmmaMmaM64N64K16F32Bf16Op, WgmmaWaitGroupSyncAlignedOp, WmmaFusedKStep4xOp,
 };
 
 // ---- Arithmetic ops --------------------------------------------------------
@@ -1514,23 +1514,6 @@ impl MirToLlvmConversion for MapaSharedClusterOp {
 }
 
 #[op_interface_impl]
-impl MirToLlvmConversion for MmaM16N8K16F32F16Op {
-    fn convert(
-        &self,
-        ctx: &mut Context,
-        rewriter: &mut DialectConversionRewriter,
-        operands_info: &OperandsInfo,
-    ) -> Result<()> {
-        super::intrinsics::wmma::convert_mma_m16n8k16_f32_f16(
-            ctx,
-            rewriter,
-            self.get_operation(),
-            operands_info,
-        )
-    }
-}
-
-#[op_interface_impl]
 impl MirToLlvmConversion for DsmemReadU32Op {
     fn convert(
         &self,
@@ -2228,6 +2211,40 @@ impl MirToLlvmConversion for LdmatrixX2TransOp {
         operands_info: &OperandsInfo,
     ) -> Result<()> {
         super::intrinsics::wmma::convert_ldmatrix_x2_trans(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for MmaM16N8K16F32F16Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::wmma::convert_mma_m16n8k16_f32_f16(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for WmmaFusedKStep4xOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::wmma::convert_wmma_fused_k_step_4x(
             ctx,
             rewriter,
             self.get_operation(),
