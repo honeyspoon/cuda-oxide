@@ -3188,6 +3188,36 @@ fn try_dispatch_intrinsic(
         }
 
         // =================================================================
+        // WMMA / ldmatrix (from intrinsics::wmma)
+        // =================================================================
+        "cuda_device::wmma::ldmatrix_x1" => Ok(Some(intrinsics::wmma::emit_ldmatrix_x1(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::wmma::ldmatrix_x1_trans" => {
+            Ok(Some(intrinsics::wmma::emit_ldmatrix_x1_trans(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+
+        // =================================================================
         // bf16x2 packed arithmetic (from intrinsics::bf16x2)
         // =================================================================
         "cuda_device::bf16x2::fma_bf16x2" => Ok(Some(intrinsics::bf16x2::emit_fma_bf16x2(

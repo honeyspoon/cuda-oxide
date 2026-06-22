@@ -1337,3 +1337,32 @@ fn test_bool_phi_cmp_lowers_to_unsigned_i1_icmp() -> Result<(), anyhow::Error> {
     );
     Ok(())
 }
+
+#[test]
+fn test_ldmatrix_x1_lowers_to_inline_asm() -> Result<(), anyhow::Error> {
+    use pliron::builtin::types::{IntegerType, Signedness};
+
+    let mut ctx = make_test_ctx();
+    let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signless);
+    let i64_ty = IntegerType::get(&mut ctx, 64, Signedness::Signless);
+
+    let (module_ptr, entry) = build_test_kernel(&mut ctx, vec![i64_ty.into()]);
+    let smem_val = entry.deref(&ctx).get_argument(0);
+
+    let op = Operation::new(
+        &mut ctx,
+        nvvm::LdmatrixX1Op::get_concrete_op_info(),
+        vec![i32_ty.into()],
+        vec![smem_val],
+        vec![],
+        0,
+    );
+    op.insert_at_back(entry, &ctx);
+    append_return(&mut ctx, entry);
+
+    assert_inline_asm_lowering(
+        &mut ctx,
+        module_ptr,
+        "ldmatrix.sync.aligned.m8n8.x1.shared.b16",
+    )
+}
