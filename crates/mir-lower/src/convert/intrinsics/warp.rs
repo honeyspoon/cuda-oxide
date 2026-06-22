@@ -32,6 +32,7 @@
 //! | `MatchAllSyncI64` | `llvm.nvvm.match.all.sync.i64p`   | 64-bit variant               |
 
 use crate::convert::intrinsics::common::*;
+use llvm_export::ops::{AsmKind, InlineAsmOp, InlineAsmOpExt};
 use llvm_export::types as llvm_types;
 use pliron::builtin::types::{FP32Type, IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
@@ -373,15 +374,16 @@ pub(crate) fn convert_elect_sync(
 
     let asm_template = "{ .reg .pred p; elect.sync p|_, $1; selp.u32 $0, 1, 0, p; }";
     let constraints = "=r,r";
-
-    let asm_op = inline_asm_convergent(
+    let inline_asm = InlineAsmOp::build(
         ctx,
-        rewriter,
         i32_ty.into(),
         vec![membermask],
         asm_template,
         constraints,
+        AsmKind::ConvergentPure,
     );
+    rewriter.insert_operation(ctx, inline_asm.get_operation());
+    let asm_op = inline_asm.get_operation();
 
     let i32_result = asm_op.deref(ctx).get_result(0);
     let i1_result = trunc_to_i1(ctx, rewriter, i32_result);
