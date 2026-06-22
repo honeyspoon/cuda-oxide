@@ -517,3 +517,43 @@ pub fn redux_sync_add(mask: u32, value: u32) -> u32 {
     let _ = (mask, value);
     unreachable!("redux_sync_add called outside CUDA kernel context")
 }
+
+// =============================================================================
+// Warp Leader Election (sm_90+)
+// =============================================================================
+
+/// Elect a single leader thread from the participating lanes.
+///
+/// PTX `elect.sync`. Returns `true` for exactly one thread (the elected
+/// leader) within the set of threads identified by `membermask`, and `false`
+/// for all other participating threads. The elected leader is
+/// implementation-defined but deterministic for a given mask.
+///
+/// Requires sm_90+ (Hopper and later).
+///
+/// # Parameters
+///
+/// - `membermask`: warp lane participation mask. Bit `k` set means lane `k`
+///   participates in the election. All lanes whose bit is set must reach
+///   this call with the same mask value (standard `*.sync` convergence
+///   requirement).
+///
+/// # Returns
+///
+/// `true` for the elected leader, `false` for all other participating lanes.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let mask = warp::active_mask();
+/// let is_leader = warp::elect_sync(mask);
+/// if is_leader {
+///     // Only the leader performs the work.
+///     do_exclusive_work();
+/// }
+/// ```
+#[inline(never)]
+pub fn elect_sync(membermask: u32) -> bool {
+    let _ = membermask;
+    unreachable!("elect_sync called outside CUDA kernel context")
+}

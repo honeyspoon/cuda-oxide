@@ -343,3 +343,49 @@ pub(crate) fn convert_match_all(
     rewriter.replace_operation_with_values(ctx, op, vec![mask_result]);
     Ok(())
 }
+
+/// Convert an `elect.sync` op to inline PTX.
+///
+/// There is no direct LLVM intrinsic for `elect.sync`, so we lower it to
+/// inline assembly. The PTX snippet:
+///
+/// ```ptx
+/// .reg .pred p;
+/// elect.sync p|_, $1;
+/// selp.u32 $0, 1, 0, p;
+/// ```
+///
+/// Where `$0` is the output (i32, 0 or 1) and `$1` is the membermask input.
+/// The i32 result is then truncated to i1 to match the op's predicate type.
+pub(crate) fn convert_elect_sync(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signless);
+
+    let operands: Vec<_> = op.deref(ctx).operands().collect();
+    if operands.len() != 1 {
+        return pliron::input_err_noloc!("elect.sync requires 1 operand [membermask]");
+    }
+    let membermask = operands[0];
+
+    let asm_template = "{ .reg .pred p; elect.sync p|_, $1; selp.u32 $0, 1, 0, p; }";
+    let constraints = "=r,r";
+
+    let asm_op = inline_asm_convergent(
+        ctx,
+        rewriter,
+        i32_ty.into(),
+        vec![membermask],
+        asm_template,
+        constraints,
+    );
+
+    let i32_result = asm_op.deref(ctx).get_result(0);
+    let i1_result = trunc_to_i1(ctx, rewriter, i32_result);
+
+    rewriter.replace_operation_with_values(ctx, op, vec![i1_result]);
+    Ok(())
+}

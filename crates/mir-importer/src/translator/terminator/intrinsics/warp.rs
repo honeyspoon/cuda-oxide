@@ -657,3 +657,75 @@ pub fn emit_warp_vote(
         "warp vote call without target block",
     )
 }
+
+/// Emit `warp::elect_sync(membermask)`: warp leader election.
+///
+/// Generates an `nvvm.elect_sync` op that takes a membermask (i32) and
+/// returns a predicate (i1) that is true for exactly one elected leader
+/// thread. Requires sm_90+ (Hopper).
+pub fn emit_elect_sync(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    use dialect_nvvm::ops::ElectSyncOp;
+
+    if args.len() != 1 {
+        return input_err!(
+            loc.clone(),
+            TranslationErr::unsupported(format!(
+                "warp::elect_sync expects 1 argument [membermask], got {}",
+                args.len()
+            ))
+        );
+    }
+
+    let (membermask, last_op) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[0],
+        value_map,
+        block_ptr,
+        prev_op,
+        loc.clone(),
+    )?;
+
+    let result_type = types::get_bool_type(ctx).to_ptr();
+
+    let elect_op = Operation::new(
+        ctx,
+        ElectSyncOp::get_concrete_op_info(),
+        vec![result_type],
+        vec![membermask],
+        vec![],
+        0,
+    );
+    elect_op.deref_mut(ctx).set_loc(loc.clone());
+
+    if let Some(prev) = last_op {
+        elect_op.insert_after(ctx, prev);
+    } else {
+        elect_op.insert_at_front(block_ptr, ctx);
+    }
+
+    let result_value = elect_op.deref(ctx).get_result(0);
+    emit_store_result_and_goto(
+        ctx,
+        destination,
+        result_value,
+        target,
+        block_ptr,
+        elect_op,
+        value_map,
+        block_map,
+        loc,
+        "warp::elect_sync call without target block",
+    )
+}

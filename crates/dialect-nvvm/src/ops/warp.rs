@@ -706,4 +706,40 @@ pub(super) fn register(ctx: &mut Context) {
     ActiveMaskOp::register(ctx);
     // Warp-scoped barrier
     BarWarpSyncOp::register(ctx);
+    // Leader election (sm_90+)
+    ElectSyncOp::register(ctx);
+}
+
+// =============================================================================
+// Warp Leader Election (sm_90+)
+// =============================================================================
+
+/// Warp leader election: elect exactly one leader from a set of participating lanes.
+///
+/// Corresponds to PTX `elect.sync`. Lowered via inline PTX (no direct LLVM
+/// intrinsic). Requires sm_90+.
+///
+/// Returns a predicate that is `true` for exactly one thread (the elected
+/// leader) and `false` for all other participating threads.
+///
+/// # Operands
+///
+/// - `membermask` (i32): warp lane participation mask (`-1` = full warp)
+///
+/// # Results
+///
+/// - `result` (i1): true for the elected leader, false for all others
+#[pliron_op(
+    name = "nvvm.elect_sync",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<1>, NResultsInterface<1>],
+)]
+pub struct ElectSyncOp;
+
+impl ElectSyncOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ElectSyncOp { op }
+    }
 }
