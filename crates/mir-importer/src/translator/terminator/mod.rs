@@ -2219,6 +2219,32 @@ fn try_dispatch_intrinsic(
         )?)),
 
         // =================================================================
+        // Shared Memory Size Registers
+        // =================================================================
+        "cuda_device::shared::dynamic_smem_size" => Ok(Some(helpers::emit_nvvm_intrinsic(
+            ctx,
+            dialect_nvvm::ops::ReadPtxSregDynamicSmemSizeOp::get_concrete_op_info(),
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::shared::total_smem_size" => Ok(Some(helpers::emit_nvvm_intrinsic(
+            ctx,
+            dialect_nvvm::ops::ReadPtxSregTotalSmemSizeOp::get_concrete_op_info(),
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+
+        // =================================================================
         // Thread Index Helpers (from intrinsics::indexing)
         // Support both re-exported (cuda_device::) and full paths (cuda_device::thread::)
         //

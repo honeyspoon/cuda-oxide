@@ -455,3 +455,44 @@ impl<T, const ALIGN: usize> DynamicSharedArray<T, ALIGN> {
         unreachable!("DynamicSharedArray::offset called outside CUDA kernel context")
     }
 }
+
+// =============================================================================
+// Shared Memory Size Special Registers
+// =============================================================================
+
+/// Returns the size (in bytes) of dynamically-allocated shared memory.
+///
+/// Corresponds to PTX `%dynamic_smem_size`. Returns the number of bytes
+/// of shared memory that were dynamically allocated for the current kernel
+/// launch via `LaunchConfig::shared_mem_bytes`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let dyn_bytes = shared::dynamic_smem_size();
+/// let num_f32_elements = dyn_bytes as usize / core::mem::size_of::<f32>();
+/// ```
+#[inline(never)]
+pub fn dynamic_smem_size() -> u32 {
+    // Lowered to: call i32 @llvm.nvvm.read.ptx.sreg.dynamic.smem.size()
+    unreachable!("dynamic_smem_size called outside CUDA kernel context")
+}
+
+/// Returns the total shared memory size (in bytes) available to the CTA.
+///
+/// Corresponds to PTX `%total_smem_size`. Returns the total amount of
+/// shared memory available to the current CTA, including both statically
+/// and dynamically allocated shared memory.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let total = shared::total_smem_size();
+/// let dynamic = shared::dynamic_smem_size();
+/// let static_bytes = total - dynamic;
+/// ```
+#[inline(never)]
+pub fn total_smem_size() -> u32 {
+    // Lowered to: call i32 @llvm.nvvm.read.ptx.sreg.total.smem.size()
+    unreachable!("total_smem_size called outside CUDA kernel context")
+}

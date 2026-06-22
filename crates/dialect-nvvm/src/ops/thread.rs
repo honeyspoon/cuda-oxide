@@ -862,6 +862,46 @@ impl ReadPtxSregGridIdOp {
     }
 }
 
+// =============================================================================
+// Shared Memory Size Special Registers
+// =============================================================================
+
+/// Read the size of dynamically-allocated shared memory (bytes).
+///
+/// Corresponds to `llvm.nvvm.read.ptx.sreg.dynamic.smem.size` / PTX `%dynamic_smem_size`.
+#[pliron_op(
+    name = "nvvm.read_ptx_sreg_dynamic_smem_size",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<0>, NResultsInterface<1>],
+)]
+pub struct ReadPtxSregDynamicSmemSizeOp;
+
+impl ReadPtxSregDynamicSmemSizeOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReadPtxSregDynamicSmemSizeOp { op }
+    }
+}
+
+/// Read the total shared memory size available to the CTA (bytes).
+///
+/// Corresponds to `llvm.nvvm.read.ptx.sreg.total.smem.size` / PTX `%total_smem_size`.
+#[pliron_op(
+    name = "nvvm.read_ptx_sreg_total_smem_size",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<0>, NResultsInterface<1>],
+)]
+pub struct ReadPtxSregTotalSmemSizeOp;
+
+impl ReadPtxSregTotalSmemSizeOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReadPtxSregTotalSmemSizeOp { op }
+    }
+}
+
 /// Register thread indexing operations with the context.
 pub(super) fn register(ctx: &mut Context) {
     // X-dimension
@@ -892,4 +932,7 @@ pub(super) fn register(ctx: &mut Context) {
     ReadPtxSregSmIdOp::register(ctx);
     ReadPtxSregNsmIdOp::register(ctx);
     ReadPtxSregGridIdOp::register(ctx);
+    // Shared memory size registers
+    ReadPtxSregDynamicSmemSizeOp::register(ctx);
+    ReadPtxSregTotalSmemSizeOp::register(ctx);
 }
