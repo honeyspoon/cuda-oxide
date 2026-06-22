@@ -26,7 +26,7 @@ use rustc_public::mir;
 ///
 /// # Generated Operation
 ///
-/// `nvvm.movmatrix_trans_b16` — one i32 operand, one i32 result.
+/// `nvvm.movmatrix_trans_b16`, one i32 operand, one i32 result.
 pub fn emit_movmatrix_trans_b16(
     ctx: &mut Context,
     body: &mir::Body,

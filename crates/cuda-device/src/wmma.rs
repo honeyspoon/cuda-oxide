@@ -8,7 +8,7 @@
 //! This module provides in-register matrix transpose and related warp-cooperative
 //! matrix operations that operate on data distributed across a warp's register file.
 //!
-//! # `movmatrix` — In-Register 8×8 Transpose
+//! # `movmatrix`: In-Register 8×8 Transpose
 //!
 //! The `movmatrix.sync.aligned.m8n8.trans.b16` instruction transposes an 8×8 matrix
 //! of 16-bit elements held collectively in the registers of a warp. Each thread
