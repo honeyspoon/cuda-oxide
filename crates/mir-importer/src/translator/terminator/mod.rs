@@ -3856,6 +3856,23 @@ fn try_dispatch_intrinsic(
                 ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
             )?))
         }
+        // Array-based stmatrix stubs (from cuda_device::wmma)
+        "cuda_device::wmma::stmatrix_x4" => Ok(Some(intrinsics::memory::emit_stmatrix_x4(
+            ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+        )?)),
+        "cuda_device::wmma::stmatrix_x2" => Ok(Some(intrinsics::memory::emit_stmatrix_x2(
+            ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+        )?)),
+        "cuda_device::wmma::stmatrix_x4_trans" => {
+            Ok(Some(intrinsics::memory::emit_stmatrix_x4_trans(
+                ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+            )?))
+        }
+        "cuda_device::wmma::stmatrix_x2_trans" => {
+            Ok(Some(intrinsics::memory::emit_stmatrix_x2_trans(
+                ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+            )?))
+        }
         "cuda_device::tcgen05::cvt_f32x2_bf16x2" => {
             Ok(Some(intrinsics::memory::emit_cvt_f32x2_bf16x2(
                 ctx,

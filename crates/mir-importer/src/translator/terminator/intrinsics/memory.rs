@@ -298,6 +298,302 @@ pub fn emit_stmatrix_m8n8_x2_trans(
     }
 }
 
+// =============================================================================
+// Array-based stmatrix stubs (from cuda_device::wmma)
+// =============================================================================
+
+/// Helper: extract `count` u32 elements from an array reference and build a
+/// stmatrix dialect operation.
+///
+/// The caller provides the dialect op info to create (x4/x2, trans/non-trans).
+/// `args[0]` is the shared memory pointer, `args[1]` is a `&[u32; N]`.
+///
+/// The function emits:
+///   1. Translate args[0] -> smem_ptr value
+///   2. Translate args[1] -> array reference (pointer to `[u32; N]`)
+///   3. For each element `i` in 0..count:
+///      a. Emit `MirPtrOffsetOp` to get pointer to element `i`
+///      b. Emit `MirLoadOp` to load the u32 value
+///   4. Build the stmatrix op with (smem_ptr, r0, r1, ...)
+///   5. Emit goto to the target block
+#[allow(clippy::too_many_arguments)]
+fn emit_stmatrix_from_array(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+    count: usize,
+    op_info: (fn(Ptr<Operation>) -> pliron::op::OpObj, core::any::TypeId),
+    intrinsic_name: &str,
+) -> TranslationResult<Ptr<Operation>> {
+    use dialect_mir::ops::{MirLoadOp, MirPtrOffsetOp};
+    use dialect_mir::types::MirPtrType;
+
+    if args.len() != 2 {
+        return input_err!(
+            loc.clone(),
+            TranslationErr::unsupported(format!(
+                "{} expects 2 arguments (smem_ptr, data), got {}",
+                intrinsic_name,
+                args.len()
+            ))
+        );
+    }
+
+    let mut last_op = prev_op;
+
+    // Translate args[0]: smem_ptr (*mut u32)
+    let (smem_ptr, last_op_after) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[0],
+        value_map,
+        block_ptr,
+        last_op,
+        loc.clone(),
+    )?;
+    last_op = last_op_after;
+
+    // Translate args[1]: &[u32; N] (pointer to array)
+    let (array_ref, last_op_after) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[1],
+        value_map,
+        block_ptr,
+        last_op,
+        loc.clone(),
+    )?;
+    last_op = last_op_after;
+
+    // Determine the element type (u32) and pointer type for loads
+    let u32_ty = IntegerType::get(ctx, 32, Signedness::Unsigned);
+    let u32_ptr_ty = MirPtrType::get(ctx, u32_ty.into(), false, 0);
+
+    // Extract each element from the array
+    let mut data_vals = Vec::with_capacity(count);
+    for i in 0..count {
+        // Create index constant
+        let i64_ty = IntegerType::get(ctx, 64, Signedness::Signless);
+        let apint = APInt::from_i64(i as i64, std::num::NonZeroUsize::new(64).unwrap());
+        let index_attr = IntegerAttr::new(i64_ty, apint);
+        let const_op = Operation::new(
+            ctx,
+            MirConstantOp::get_concrete_op_info(),
+            vec![i64_ty.into()],
+            vec![],
+            vec![],
+            0,
+        );
+        const_op.deref_mut(ctx).set_loc(loc.clone());
+        MirConstantOp::new(const_op).set_attr_value(ctx, index_attr);
+        if let Some(prev) = last_op {
+            const_op.insert_after(ctx, prev);
+        } else {
+            const_op.insert_at_front(block_ptr, ctx);
+        }
+        last_op = Some(const_op);
+
+        let index_val = const_op.deref(ctx).get_result(0);
+
+        // Emit ptr offset: &array[i]
+        let offset_op = Operation::new(
+            ctx,
+            MirPtrOffsetOp::get_concrete_op_info(),
+            vec![u32_ptr_ty.into()],
+            vec![array_ref, index_val],
+            vec![],
+            0,
+        );
+        offset_op.deref_mut(ctx).set_loc(loc.clone());
+        if let Some(prev) = last_op {
+            offset_op.insert_after(ctx, prev);
+        } else {
+            offset_op.insert_at_front(block_ptr, ctx);
+        }
+        last_op = Some(offset_op);
+
+        let elem_ptr = offset_op.deref(ctx).get_result(0);
+
+        // Emit load: *(&array[i])
+        let load_op = Operation::new(
+            ctx,
+            MirLoadOp::get_concrete_op_info(),
+            vec![u32_ty.into()],
+            vec![elem_ptr],
+            vec![],
+            0,
+        );
+        load_op.deref_mut(ctx).set_loc(loc.clone());
+        if let Some(prev) = last_op {
+            load_op.insert_after(ctx, prev);
+        } else {
+            load_op.insert_at_front(block_ptr, ctx);
+        }
+        last_op = Some(load_op);
+
+        data_vals.push(load_op.deref(ctx).get_result(0));
+    }
+
+    // Build operands: [smem_ptr, r0, r1, ...]
+    let mut operands = Vec::with_capacity(1 + count);
+    operands.push(smem_ptr);
+    operands.extend(data_vals);
+
+    // Create the stmatrix dialect op
+    let st_op = Operation::new(ctx, op_info, vec![], operands, vec![], 0);
+    st_op.deref_mut(ctx).set_loc(loc.clone());
+
+    if let Some(prev) = last_op {
+        st_op.insert_after(ctx, prev);
+    } else {
+        st_op.insert_at_front(block_ptr, ctx);
+    }
+
+    if let Some(target_idx) = target {
+        let goto_op = emit_goto(ctx, *target_idx, st_op, block_map, loc);
+        Ok(goto_op)
+    } else {
+        input_err!(
+            loc.clone(),
+            TranslationErr::unsupported(format!("{} call without target block", intrinsic_name))
+        )
+    }
+}
+
+/// Emit `stmatrix_x4`: Warp-cooperative matrix store (4 tiles) from array.
+///
+/// Args: (smem_ptr: *mut u32, data: &[u32; 4])
+///
+/// PTX: `stmatrix.sync.aligned.m8n8.x4.shared.b16 [addr], {r0, r1, r2, r3};`
+pub fn emit_stmatrix_x4(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_stmatrix_from_array(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        4,
+        StmatrixM8n8X4Op::get_concrete_op_info(),
+        "stmatrix_x4",
+    )
+}
+
+/// Emit `stmatrix_x2`: Warp-cooperative matrix store (2 tiles) from array.
+///
+/// Args: (smem_ptr: *mut u32, data: &[u32; 2])
+///
+/// PTX: `stmatrix.sync.aligned.m8n8.x2.shared.b16 [addr], {r0, r1};`
+pub fn emit_stmatrix_x2(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_stmatrix_from_array(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        2,
+        StmatrixM8n8X2Op::get_concrete_op_info(),
+        "stmatrix_x2",
+    )
+}
+
+/// Emit `stmatrix_x4_trans`: Warp-cooperative matrix store (4 tiles) with transpose from array.
+///
+/// Args: (smem_ptr: *mut u32, data: &[u32; 4])
+///
+/// PTX: `stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [addr], {r0, r1, r2, r3};`
+pub fn emit_stmatrix_x4_trans(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_stmatrix_from_array(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        4,
+        StmatrixM8n8X4TransOp::get_concrete_op_info(),
+        "stmatrix_x4_trans",
+    )
+}
+
+/// Emit `stmatrix_x2_trans`: Warp-cooperative matrix store (2 tiles) with transpose from array.
+///
+/// Args: (smem_ptr: *mut u32, data: &[u32; 2])
+///
+/// PTX: `stmatrix.sync.aligned.m8n8.x2.trans.shared.b16 [addr], {r0, r1};`
+pub fn emit_stmatrix_x2_trans(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_stmatrix_from_array(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        2,
+        StmatrixM8n8X2TransOp::get_concrete_op_info(),
+        "stmatrix_x2_trans",
+    )
+}
+
 /// Emit cvt_f32x2_bf16x2: Convert two f32 to packed bf16x2.
 ///
 /// Args: (a: f32, b: f32)
