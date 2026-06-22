@@ -677,6 +677,181 @@ impl ReduxSyncAddOp {
     }
 }
 
+/// Warp-wide unsigned minimum reduction (`redux.sync.min.u32`, sm_80+).
+///
+/// # Operands
+///
+/// - `mask` (i32): lane mask selecting participating threads
+/// - `value` (i32): this lane's contribution
+///
+/// # Results
+///
+/// - `result` (i32): the unsigned minimum over all lanes in `mask`, broadcast to every lane
+#[pliron_op(
+    name = "nvvm.redux_sync_umin",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<2>, NResultsInterface<1>],
+)]
+pub struct ReduxSyncUminOp;
+
+impl ReduxSyncUminOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReduxSyncUminOp { op }
+    }
+}
+
+/// Warp-wide unsigned maximum reduction (`redux.sync.max.u32`, sm_80+).
+///
+/// # Operands
+///
+/// - `mask` (i32): lane mask selecting participating threads
+/// - `value` (i32): this lane's contribution
+///
+/// # Results
+///
+/// - `result` (i32): the unsigned maximum over all lanes in `mask`, broadcast to every lane
+#[pliron_op(
+    name = "nvvm.redux_sync_umax",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<2>, NResultsInterface<1>],
+)]
+pub struct ReduxSyncUmaxOp;
+
+impl ReduxSyncUmaxOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReduxSyncUmaxOp { op }
+    }
+}
+
+/// Warp-wide signed minimum reduction (`redux.sync.min.s32`, sm_80+).
+///
+/// # Operands
+///
+/// - `mask` (i32): lane mask selecting participating threads
+/// - `value` (i32): this lane's contribution
+///
+/// # Results
+///
+/// - `result` (i32): the signed minimum over all lanes in `mask`, broadcast to every lane
+#[pliron_op(
+    name = "nvvm.redux_sync_min",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<2>, NResultsInterface<1>],
+)]
+pub struct ReduxSyncMinOp;
+
+impl ReduxSyncMinOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReduxSyncMinOp { op }
+    }
+}
+
+/// Warp-wide signed maximum reduction (`redux.sync.max.s32`, sm_80+).
+///
+/// # Operands
+///
+/// - `mask` (i32): lane mask selecting participating threads
+/// - `value` (i32): this lane's contribution
+///
+/// # Results
+///
+/// - `result` (i32): the signed maximum over all lanes in `mask`, broadcast to every lane
+#[pliron_op(
+    name = "nvvm.redux_sync_max",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<2>, NResultsInterface<1>],
+)]
+pub struct ReduxSyncMaxOp;
+
+impl ReduxSyncMaxOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReduxSyncMaxOp { op }
+    }
+}
+
+/// Warp-wide bitwise AND reduction (`redux.sync.and.b32`, sm_80+).
+///
+/// # Operands
+///
+/// - `mask` (i32): lane mask selecting participating threads
+/// - `value` (i32): this lane's contribution
+///
+/// # Results
+///
+/// - `result` (i32): the bitwise AND over all lanes in `mask`, broadcast to every lane
+#[pliron_op(
+    name = "nvvm.redux_sync_and",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<2>, NResultsInterface<1>],
+)]
+pub struct ReduxSyncAndOp;
+
+impl ReduxSyncAndOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReduxSyncAndOp { op }
+    }
+}
+
+/// Warp-wide bitwise OR reduction (`redux.sync.or.b32`, sm_80+).
+///
+/// # Operands
+///
+/// - `mask` (i32): lane mask selecting participating threads
+/// - `value` (i32): this lane's contribution
+///
+/// # Results
+///
+/// - `result` (i32): the bitwise OR over all lanes in `mask`, broadcast to every lane
+#[pliron_op(
+    name = "nvvm.redux_sync_or",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<2>, NResultsInterface<1>],
+)]
+pub struct ReduxSyncOrOp;
+
+impl ReduxSyncOrOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReduxSyncOrOp { op }
+    }
+}
+
+/// Warp-wide bitwise XOR reduction (`redux.sync.xor.b32`, sm_80+).
+///
+/// # Operands
+///
+/// - `mask` (i32): lane mask selecting participating threads
+/// - `value` (i32): this lane's contribution
+///
+/// # Results
+///
+/// - `result` (i32): the bitwise XOR over all lanes in `mask`, broadcast to every lane
+#[pliron_op(
+    name = "nvvm.redux_sync_xor",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<2>, NResultsInterface<1>],
+)]
+pub struct ReduxSyncXorOp;
+
+impl ReduxSyncXorOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        ReduxSyncXorOp { op }
+    }
+}
+
 /// Register warp operations with the context.
 pub(super) fn register(ctx: &mut Context) {
     // Lane identification
@@ -702,6 +877,13 @@ pub(super) fn register(ctx: &mut Context) {
     MatchAllSyncI64Op::register(ctx);
     // Reduction (sm_80+)
     ReduxSyncAddOp::register(ctx);
+    ReduxSyncUminOp::register(ctx);
+    ReduxSyncUmaxOp::register(ctx);
+    ReduxSyncMinOp::register(ctx);
+    ReduxSyncMaxOp::register(ctx);
+    ReduxSyncAndOp::register(ctx);
+    ReduxSyncOrOp::register(ctx);
+    ReduxSyncXorOp::register(ctx);
     // Active mask
     ActiveMaskOp::register(ctx);
     // Warp-scoped barrier

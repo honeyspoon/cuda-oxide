@@ -517,3 +517,87 @@ pub fn redux_sync_add(mask: u32, value: u32) -> u32 {
     let _ = (mask, value);
     unreachable!("redux_sync_add called outside CUDA kernel context")
 }
+
+/// Warp-wide unsigned minimum reduction (single instruction, sm_80+).
+///
+/// Returns the minimum `value` across all lanes specified in `mask`.
+/// Each participating lane receives the same result.
+///
+/// See also: [`redux_sync_umax`], [`redux_sync_add`]
+#[inline(never)]
+pub fn redux_sync_umin(mask: u32, value: u32) -> u32 {
+    let _ = (mask, value);
+    unreachable!("redux_sync_umin called outside CUDA kernel context")
+}
+
+/// Warp-wide unsigned maximum reduction (single instruction, sm_80+).
+///
+/// Returns the maximum `value` across all lanes specified in `mask`.
+/// Each participating lane receives the same result.
+///
+/// See also: [`redux_sync_umin`], [`redux_sync_add`]
+#[inline(never)]
+pub fn redux_sync_umax(mask: u32, value: u32) -> u32 {
+    let _ = (mask, value);
+    unreachable!("redux_sync_umax called outside CUDA kernel context")
+}
+
+/// Warp-wide signed minimum reduction (single instruction, sm_80+).
+///
+/// Returns the minimum `value` across all lanes specified in `mask`.
+/// Each participating lane receives the same result.
+///
+/// See also: [`redux_sync_max`], [`redux_sync_add`]
+#[inline(never)]
+pub fn redux_sync_min(mask: u32, value: u32) -> u32 {
+    let _ = (mask, value);
+    unreachable!("redux_sync_min called outside CUDA kernel context")
+}
+
+/// Warp-wide signed maximum reduction (single instruction, sm_80+).
+///
+/// Returns the maximum `value` across all lanes specified in `mask`.
+/// Each participating lane receives the same result.
+///
+/// See also: [`redux_sync_min`], [`redux_sync_add`]
+#[inline(never)]
+pub fn redux_sync_max(mask: u32, value: u32) -> u32 {
+    let _ = (mask, value);
+    unreachable!("redux_sync_max called outside CUDA kernel context")
+}
+
+/// Warp-wide bitwise AND reduction (single instruction, sm_80+).
+///
+/// Returns the bitwise AND of `value` across all lanes specified in `mask`.
+/// Each participating lane receives the same result.
+///
+/// See also: [`redux_sync_or`], [`redux_sync_xor`]
+#[inline(never)]
+pub fn redux_sync_and(mask: u32, value: u32) -> u32 {
+    let _ = (mask, value);
+    unreachable!("redux_sync_and called outside CUDA kernel context")
+}
+
+/// Warp-wide bitwise OR reduction (single instruction, sm_80+).
+///
+/// Returns the bitwise OR of `value` across all lanes specified in `mask`.
+/// Each participating lane receives the same result.
+///
+/// See also: [`redux_sync_and`], [`redux_sync_xor`]
+#[inline(never)]
+pub fn redux_sync_or(mask: u32, value: u32) -> u32 {
+    let _ = (mask, value);
+    unreachable!("redux_sync_or called outside CUDA kernel context")
+}
+
+/// Warp-wide bitwise XOR reduction (single instruction, sm_80+).
+///
+/// Returns the bitwise XOR of `value` across all lanes specified in `mask`.
+/// Each participating lane receives the same result.
+///
+/// See also: [`redux_sync_and`], [`redux_sync_or`]
+#[inline(never)]
+pub fn redux_sync_xor(mask: u32, value: u32) -> u32 {
+    let _ = (mask, value);
+    unreachable!("redux_sync_xor called outside CUDA kernel context")
+}
