@@ -102,7 +102,7 @@ fn convert_unary_bf16x2(
     name: &str,
 ) -> Result<()> {
     let operands: Vec<_> = op.deref(ctx).operands().collect();
-    if operands.len() < 1 {
+    if operands.is_empty() {
         return pliron::input_err_noloc!("{} requires 1 operand", name);
     }
 

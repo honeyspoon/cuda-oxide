@@ -19,7 +19,7 @@ use pliron::builtin::types::{IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
 use pliron::input_err;
 use pliron::location::{Located, Location};
-use pliron::op::Op;
+use pliron::op::{Op, OpObj};
 use pliron::operation::Operation;
 use rustc_public::mir;
 
@@ -133,7 +133,7 @@ fn emit_binary_bf16x2(
     value_map: &mut ValueMap,
     block_map: &[Ptr<BasicBlock>],
     loc: Location,
-    op_info: pliron::op::OpId,
+    op_info: (fn(Ptr<Operation>) -> OpObj, std::any::TypeId),
     name: &str,
 ) -> TranslationResult<Ptr<Operation>> {
     if args.len() != 2 {
@@ -219,7 +219,7 @@ fn emit_unary_bf16x2(
     value_map: &mut ValueMap,
     block_map: &[Ptr<BasicBlock>],
     loc: Location,
-    op_info: pliron::op::OpId,
+    op_info: (fn(Ptr<Operation>) -> OpObj, std::any::TypeId),
     name: &str,
 ) -> TranslationResult<Ptr<Operation>> {
     if args.len() != 1 {
