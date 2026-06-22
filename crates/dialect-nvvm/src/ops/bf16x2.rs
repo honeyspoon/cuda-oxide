@@ -34,6 +34,24 @@ impl FmaBf16x2Op {
     }
 }
 
+/// Fused multiply-add with ReLU on packed bf16x2 values: `d = max(0, a * b + c)`.
+///
+/// PTX: `fma.rn.relu.bf16x2 $0, $1, $2, $3;`  (requires `sm_80+`)
+#[pliron_op(
+    name = "nvvm.fma_relu_bf16x2",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<3>, NResultsInterface<1>],
+)]
+pub struct FmaReluBf16x2Op;
+
+impl FmaReluBf16x2Op {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        FmaReluBf16x2Op { op }
+    }
+}
+
 /// Packed bf16x2 addition: `d = a + b`.
 ///
 /// PTX: `add.rn.bf16x2 $0, $1, $2;`  (requires `sm_90+`)
@@ -163,6 +181,7 @@ impl AbsBf16x2Op {
 /// Register bf16x2 operations with the context.
 pub(super) fn register(ctx: &mut Context) {
     FmaBf16x2Op::register(ctx);
+    FmaReluBf16x2Op::register(ctx);
     AddBf16x2Op::register(ctx);
     SubBf16x2Op::register(ctx);
     MulBf16x2Op::register(ctx);

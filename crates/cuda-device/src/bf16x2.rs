@@ -174,3 +174,23 @@ pub fn abs_bf16x2(a: u32) -> u32 {
     let _ = a;
     unreachable!("abs_bf16x2 called outside CUDA kernel context")
 }
+
+/// Fused multiply-add with ReLU: `max(0, a * b + c)` on packed bf16x2 values.
+///
+/// Each `u32` carries two packed bf16 values. The operation computes
+/// `fma.rn.relu.bf16x2`, applying ReLU (clamp-to-zero) after the FMA.
+///
+/// # PTX
+///
+/// ```ptx
+/// fma.rn.relu.bf16x2 %d, %a, %b, %c;
+/// ```
+///
+/// # Supported on
+///
+/// - `sm_80+` (Ampere onwards).
+#[inline(never)]
+pub fn fma_relu_bf16x2(a: u32, b: u32, c: u32) -> u32 {
+    let _ = (a, b, c);
+    unreachable!("fma_relu_bf16x2 called outside CUDA kernel context")
+}

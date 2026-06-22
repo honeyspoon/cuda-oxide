@@ -51,6 +51,41 @@ pub(crate) fn convert_fma_bf16x2(
     Ok(())
 }
 
+/// Convert `nvvm.fma_relu_bf16x2` to inline PTX.
+///
+/// `fma.rn.relu.bf16x2 %d, %a, %b, %c;` (per-thread arithmetic, non-convergent).
+pub(crate) fn convert_fma_relu_bf16x2(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    let operands: Vec<_> = op.deref(ctx).operands().collect();
+    if operands.len() < 3 {
+        return pliron::input_err_noloc!("fma_relu_bf16x2 requires 3 operands");
+    }
+
+    let a_val = operands[0];
+    let b_val = operands[1];
+    let c_val = operands[2];
+
+    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signless);
+
+    let inline_asm = llvm::InlineAsmOp::build(
+        ctx,
+        i32_ty.into(),
+        vec![a_val, b_val, c_val],
+        "fma.rn.relu.bf16x2 $0, $1, $2, $3;",
+        "=r,r,r,r",
+        AsmKind::Pure,
+    );
+
+    let asm_op = inline_asm.get_operation();
+    rewriter.insert_operation(ctx, asm_op);
+    rewriter.replace_operation(ctx, op, asm_op);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Helper: convert a binary bf16x2 op to inline PTX
 // ---------------------------------------------------------------------------

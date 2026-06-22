@@ -3202,6 +3202,20 @@ fn try_dispatch_intrinsic(
             block_map,
             loc,
         )?)),
+        "cuda_device::bf16x2::fma_relu_bf16x2" => {
+            Ok(Some(intrinsics::bf16x2::emit_fma_relu_bf16x2(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
         "cuda_device::bf16x2::add_bf16x2" => Ok(Some(intrinsics::bf16x2::emit_add_bf16x2(
             ctx,
             body,
