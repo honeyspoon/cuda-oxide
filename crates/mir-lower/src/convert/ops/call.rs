@@ -63,6 +63,7 @@
 
 use crate::convert::types::{
     StructLayoutInfo, build_struct_slot_map, convert_function_type, convert_type, is_kernel_func,
+    is_zero_sized_type,
 };
 use crate::helpers;
 use dialect_mir::ops::{MirCallOp, MirFuncOp};
@@ -89,7 +90,7 @@ use pliron::location::Located;
 use pliron::op::Op;
 use pliron::operation::Operation;
 use pliron::result::Result;
-use pliron::r#type::{TypeObj, Typed};
+use pliron::r#type::{TypeHandle, Typed};
 use pliron::utils::apint::APInt;
 use pliron::value::Value;
 use std::num::NonZeroUsize;
@@ -226,6 +227,18 @@ enum RustFloatMathIntrinsic {
     AtanF64,
     CbrtF32,
     CbrtF64,
+    SinhF32,
+    SinhF64,
+    CoshF32,
+    CoshF64,
+    TanhF32,
+    TanhF64,
+    Expm1F32,
+    Expm1F64,
+    Log1pF32,
+    Log1pF64,
+    HypotF32,
+    HypotF64,
     FaddFast,
     FsubFast,
     FmulFast,
@@ -290,6 +303,18 @@ impl RustFloatMathIntrinsic {
             rust_intrinsics::CALLEE_ATAN_F64 => Some(Self::AtanF64),
             rust_intrinsics::CALLEE_CBRT_F32 => Some(Self::CbrtF32),
             rust_intrinsics::CALLEE_CBRT_F64 => Some(Self::CbrtF64),
+            rust_intrinsics::CALLEE_SINH_F32 => Some(Self::SinhF32),
+            rust_intrinsics::CALLEE_SINH_F64 => Some(Self::SinhF64),
+            rust_intrinsics::CALLEE_COSH_F32 => Some(Self::CoshF32),
+            rust_intrinsics::CALLEE_COSH_F64 => Some(Self::CoshF64),
+            rust_intrinsics::CALLEE_TANH_F32 => Some(Self::TanhF32),
+            rust_intrinsics::CALLEE_TANH_F64 => Some(Self::TanhF64),
+            rust_intrinsics::CALLEE_EXPM1_F32 => Some(Self::Expm1F32),
+            rust_intrinsics::CALLEE_EXPM1_F64 => Some(Self::Expm1F64),
+            rust_intrinsics::CALLEE_LOG1P_F32 => Some(Self::Log1pF32),
+            rust_intrinsics::CALLEE_LOG1P_F64 => Some(Self::Log1pF64),
+            rust_intrinsics::CALLEE_HYPOT_F32 => Some(Self::HypotF32),
+            rust_intrinsics::CALLEE_HYPOT_F64 => Some(Self::HypotF64),
             rust_intrinsics::CALLEE_FADD_FAST => Some(Self::FaddFast),
             rust_intrinsics::CALLEE_FSUB_FAST => Some(Self::FsubFast),
             rust_intrinsics::CALLEE_FMUL_FAST => Some(Self::FmulFast),
@@ -303,7 +328,7 @@ impl RustFloatMathIntrinsic {
     fn libdevice_name(
         self,
         ctx: &Context,
-        result_ty: Ptr<TypeObj>,
+        result_ty: TypeHandle,
         loc: pliron::location::Location,
     ) -> Result<&'static str> {
         match self {
@@ -365,6 +390,18 @@ impl RustFloatMathIntrinsic {
             Self::AtanF64 => Ok("__nv_atan"),
             Self::CbrtF32 => Ok("__nv_cbrtf"),
             Self::CbrtF64 => Ok("__nv_cbrt"),
+            Self::SinhF32 => Ok("__nv_sinhf"),
+            Self::SinhF64 => Ok("__nv_sinh"),
+            Self::CoshF32 => Ok("__nv_coshf"),
+            Self::CoshF64 => Ok("__nv_cosh"),
+            Self::TanhF32 => Ok("__nv_tanhf"),
+            Self::TanhF64 => Ok("__nv_tanh"),
+            Self::Expm1F32 => Ok("__nv_expm1f"),
+            Self::Expm1F64 => Ok("__nv_expm1"),
+            Self::Log1pF32 => Ok("__nv_log1pf"),
+            Self::Log1pF64 => Ok("__nv_log1p"),
+            Self::HypotF32 => Ok("__nv_hypotf"),
+            Self::HypotF64 => Ok("__nv_hypot"),
             Self::FaddFast | Self::FsubFast | Self::FmulFast | Self::FdivFast | Self::FremFast => {
                 // The `f*_fast` intrinsics lower directly to LLVM `fadd`/`fsub`/
                 // `fmul`/`fdiv`/`frem` with fast-math flags, not to a libdevice
@@ -394,6 +431,8 @@ impl RustFloatMathIntrinsic {
             | Self::MinNumNszF64
             | Self::Atan2F32
             | Self::Atan2F64
+            | Self::HypotF32
+            | Self::HypotF64
             | Self::FaddFast
             | Self::FsubFast
             | Self::FmulFast
@@ -498,6 +537,7 @@ pub fn convert(
         None
     };
 
+    let mut zst_replacement_type = None;
     let result_type = if let Some(mir_ty) = mir_result_ty_ptr {
         // Only the empty tuple `()` is the unit type. `is::<MirTupleType>()`
         // also matches `(T, U, ...)`, so we have to peek at the field count.
@@ -507,10 +547,15 @@ pub fn convert(
             .deref(ctx)
             .downcast_ref::<MirTupleType>()
             .is_some_and(|t| t.get_types().is_empty());
-        if is_unit {
+        let converted = convert_type(ctx, mir_ty).map_err(anyhow_to_pliron)?;
+        if is_unit || is_zero_sized_type(ctx, converted) {
+            // NVPTX cannot carry a ZST in a function signature, so the call
+            // itself returns void. Keep the converted ZST type so any MIR uses
+            // of the result can be replaced with a typed undef below.
+            zst_replacement_type = Some(converted);
             llvm_types::VoidType::get(ctx).into()
         } else {
-            convert_type(ctx, mir_ty).map_err(anyhow_to_pliron)?
+            converted
         }
     } else {
         llvm_types::VoidType::get(ctx).into()
@@ -573,12 +618,21 @@ pub fn convert(
     let is_void = result_type.deref(ctx).is::<llvm_types::VoidType>();
     if has_result && !is_void && llvm_call.get_operation().deref(ctx).get_num_results() > 0 {
         rewriter.replace_operation(ctx, op, llvm_call.get_operation());
+    } else if op.deref(ctx).has_use()
+        && let Some(zst_type) = zst_replacement_type
+    {
+        // The ABI intentionally erases ZST returns, but MIR may still use the
+        // typed result (return it again, pass it to another call, or project a
+        // zero-sized field). Preserve the side-effecting void call and replace
+        // only its value result with an undef of the converted ZST type.
+        let undef = llvm::UndefOp::new(ctx, zst_type);
+        rewriter.insert_operation(ctx, undef.get_operation());
+        rewriter.replace_operation(ctx, op, undef.get_operation());
     } else {
         // The LLVM call has no usable result so the MIR op must be erased.
-        // That is only safe if the MIR op itself has no live uses. If it
-        // does, the result-type computation above silently dropped a real
-        // result (e.g. a non-unit return misclassified as `()`); surface
-        // that as a cuda-oxide diagnostic rather than letting pliron's
+        // This is safe for a result-less call or an unused ZST result. Any
+        // other live result means the result-type computation silently
+        // dropped a real value; report that instead of letting pliron's
         // erase-with-uses invariant panic and escape into rustc as an ICE.
         if op.deref(ctx).has_use() {
             let loc = op.deref(ctx).loc();
@@ -860,7 +914,7 @@ fn convert_rust_carrying_mul_add(
         );
     };
 
-    let wide_ty: Ptr<TypeObj> = IntegerType::get(ctx, width * 2, Signedness::Signless).into();
+    let wide_ty: TypeHandle = IntegerType::get(ctx, width * 2, Signedness::Signless).into();
 
     // Widen every operand to 2*N bits with the signedness-appropriate extension.
     let mut wide_args = Vec::with_capacity(4);
@@ -1041,7 +1095,7 @@ fn lower_fast_binop(
 /// Read the width from an integer type, or report a useful lowering error.
 fn integer_bit_width(
     ctx: &Context,
-    ty: Ptr<TypeObj>,
+    ty: TypeHandle,
     loc: pliron::location::Location,
 ) -> Result<u32> {
     let ty_ref = ty.deref(ctx);
@@ -1054,7 +1108,7 @@ fn integer_bit_width(
 /// Return the libdevice `fabs` entry point for the concrete float type.
 fn fabs_libdevice_name(
     ctx: &Context,
-    ty: Ptr<TypeObj>,
+    ty: TypeHandle,
     loc: pliron::location::Location,
 ) -> Result<&'static str> {
     let ty_ref = ty.deref(ctx);
@@ -1093,7 +1147,7 @@ fn cast_integer_value_to_type(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
     value: Value,
-    target_ty: Ptr<TypeObj>,
+    target_ty: TypeHandle,
     loc: pliron::location::Location,
 ) -> Result<(Value, Option<Ptr<Operation>>)> {
     let source_width = integer_bit_width(ctx, value.get_type(ctx), loc.clone())?;
@@ -1139,13 +1193,13 @@ fn flatten_arguments(
     rewriter: &mut DialectConversionRewriter,
     args: &[Value],
     operands_info: &OperandsInfo,
-    expected_param_tys: Option<&[Ptr<TypeObj>]>,
-) -> Result<(Vec<Value>, Vec<Ptr<TypeObj>>)> {
+    expected_param_tys: Option<&[TypeHandle]>,
+) -> Result<(Vec<Value>, Vec<TypeHandle>)> {
     let mut flattened_args = Vec::new();
     let mut flattened_arg_types = Vec::new();
 
     // Helper: pull the next expected param type, if any.
-    let take_expected = |flattened_arg_types: &Vec<Ptr<TypeObj>>| -> Option<Ptr<TypeObj>> {
+    let take_expected = |flattened_arg_types: &Vec<TypeHandle>| -> Option<TypeHandle> {
         let idx = flattened_arg_types.len();
         expected_param_tys.and_then(|tys| tys.get(idx).copied())
     };
@@ -1235,6 +1289,9 @@ fn flatten_arguments(
                 }
             }
             FlattenKind::None => {
+                if is_zero_sized_type(ctx, arg_ty) {
+                    continue;
+                }
                 let (final_arg, final_ty) = coerce_arg_to_param_ty(
                     ctx,
                     rewriter,
@@ -1272,9 +1329,9 @@ fn coerce_arg_to_param_ty(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
     arg: Value,
-    arg_ty: Ptr<TypeObj>,
-    expected_ty: Option<Ptr<TypeObj>>,
-) -> Result<(Value, Ptr<TypeObj>)> {
+    arg_ty: TypeHandle,
+    expected_ty: Option<TypeHandle>,
+) -> Result<(Value, TypeHandle)> {
     if let Some(expected_ty) = expected_ty {
         if arg_ty == expected_ty {
             return Ok((arg, arg_ty));
@@ -1310,7 +1367,7 @@ fn coerce_arg_to_param_ty(
 }
 
 /// Return the address space of `ty` if it is an LLVM pointer type.
-fn pointer_addrspace(ctx: &Context, ty: Ptr<TypeObj>) -> Option<u32> {
+fn pointer_addrspace(ctx: &Context, ty: TypeHandle) -> Option<u32> {
     ty.deref(ctx)
         .downcast_ref::<llvm_types::PointerType>()
         .map(|ptr_ty| ptr_ty.address_space())
@@ -1340,7 +1397,7 @@ fn find_callee_arg_types(
     ctx: &mut Context,
     op: Ptr<Operation>,
     callee_ident: &pliron::identifier::Identifier,
-) -> Option<Vec<Ptr<TypeObj>>> {
+) -> Option<Vec<TypeHandle>> {
     let block = op.deref(ctx).get_parent_block()?;
     let func_op = block.deref(ctx).get_parent_op(ctx)?;
     let module_op = func_op.deref(ctx).get_parent_op(ctx)?;
@@ -1627,10 +1684,10 @@ mod tests {
     /// else is rejected.
     #[test]
     fn test_fabs_libdevice_name_dispatches_on_float_width() {
-        let mut ctx = Context::new();
+        let ctx = Context::new();
         let f32_ty = FP32Type::get(&ctx).into();
         let f64_ty = FP64Type::get(&ctx).into();
-        let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signless).into();
+        let i32_ty = IntegerType::get(&ctx, 32, Signedness::Signless).into();
         let loc = pliron::location::Location::Unknown;
 
         assert_eq!(

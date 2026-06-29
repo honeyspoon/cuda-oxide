@@ -46,7 +46,7 @@ pub mod types {
         pub const TMEM: u32 = 6;
     }
 
-    use pliron::{context::Context, r#type::TypePtr};
+    use pliron::{context::Context, r#type::TypedHandle};
     pub use pliron_llvm::types::PointerType;
 
     /// Address-space convenience constructors/predicates re-homed from the
@@ -54,13 +54,13 @@ pub mod types {
     /// `PointerType::get(ctx, address_space)` + `address_space()`.
     pub trait PointerTypeExt {
         /// Pointer into the generic address space.
-        fn get_generic(ctx: &mut Context) -> TypePtr<PointerType>;
+        fn get_generic(ctx: &mut Context) -> TypedHandle<PointerType>;
         /// Pointer into the shared address space.
-        fn get_shared(ctx: &mut Context) -> TypePtr<PointerType>;
+        fn get_shared(ctx: &mut Context) -> TypedHandle<PointerType>;
         /// Pointer into the global address space.
-        fn get_global(ctx: &mut Context) -> TypePtr<PointerType>;
+        fn get_global(ctx: &mut Context) -> TypedHandle<PointerType>;
         /// Pointer into tensor memory.
-        fn get_tmem(ctx: &mut Context) -> TypePtr<PointerType>;
+        fn get_tmem(ctx: &mut Context) -> TypedHandle<PointerType>;
         /// True if this pointer is in the shared address space.
         fn is_shared(&self) -> bool;
         /// True if this pointer is in tensor memory.
@@ -68,16 +68,16 @@ pub mod types {
     }
 
     impl PointerTypeExt for PointerType {
-        fn get_generic(ctx: &mut Context) -> TypePtr<PointerType> {
+        fn get_generic(ctx: &mut Context) -> TypedHandle<PointerType> {
             PointerType::get(ctx, address_space::GENERIC)
         }
-        fn get_shared(ctx: &mut Context) -> TypePtr<PointerType> {
+        fn get_shared(ctx: &mut Context) -> TypedHandle<PointerType> {
             PointerType::get(ctx, address_space::SHARED)
         }
-        fn get_global(ctx: &mut Context) -> TypePtr<PointerType> {
+        fn get_global(ctx: &mut Context) -> TypedHandle<PointerType> {
             PointerType::get(ctx, address_space::GLOBAL)
         }
-        fn get_tmem(ctx: &mut Context) -> TypePtr<PointerType> {
+        fn get_tmem(ctx: &mut Context) -> TypedHandle<PointerType> {
             PointerType::get(ctx, address_space::TMEM)
         }
         fn is_shared(&self) -> bool {
@@ -152,7 +152,7 @@ pub mod ops {
         op::Op,
         operation::Operation,
         result::Error,
-        r#type::TypeObj,
+        r#type::TypeHandle,
         value::Value,
     };
     use pliron_derive::{pliron_attr, pliron_op};
@@ -205,7 +205,7 @@ pub mod ops {
         /// Build an `InlineAsmOp` tagged with the given [`AsmKind`].
         fn build(
             ctx: &mut Context,
-            result_ty: Ptr<TypeObj>,
+            result_ty: TypeHandle,
             inputs: Vec<Value>,
             asm_template: &str,
             constraints: &str,
@@ -216,7 +216,7 @@ pub mod ops {
     impl InlineAsmOpExt for InlineAsmOp {
         fn build(
             ctx: &mut Context,
-            result_ty: Ptr<TypeObj>,
+            result_ty: TypeHandle,
             inputs: Vec<Value>,
             asm_template: &str,
             constraints: &str,
@@ -261,6 +261,9 @@ pub mod ops {
 
     /// Op-attribute key for a `GlobalOp`'s explicit alignment.
     const GLOBAL_ALIGNMENT_KEY: &str = "cuda_oxide_global_alignment";
+    /// Op-attribute key for a `GlobalOp`'s Rust static initializer bytes,
+    /// encoded as lowercase hex.
+    const GLOBAL_INITIALIZER_HEX_KEY: &str = "cuda_oxide_global_initializer_hex";
 
     /// Op-attribute key under which a memory op's (`load` / `store` / `alloca`)
     /// explicit ABI alignment is stashed. Stamped by the mir-lower alignment
@@ -968,18 +971,22 @@ pub mod ops {
         fn new_with_alignment(
             ctx: &mut Context,
             name: Identifier,
-            ty: Ptr<TypeObj>,
+            ty: TypeHandle,
             alignment: u64,
         ) -> Self;
         /// Read the explicit alignment (bytes), if one was set.
         fn get_alignment(&self, ctx: &Context) -> Option<u64>;
+        /// Attach lowered Rust static initializer bytes to this global.
+        fn set_initializer_hex(&self, ctx: &mut Context, hex: &str);
+        /// Read lowered Rust static initializer bytes, encoded as hex.
+        fn initializer_hex(&self, ctx: &Context) -> Option<String>;
     }
 
     impl GlobalOpExt for GlobalOp {
         fn new_with_alignment(
             ctx: &mut Context,
             name: Identifier,
-            ty: Ptr<TypeObj>,
+            ty: TypeHandle,
             alignment: u64,
         ) -> Self {
             let op = GlobalOp::new(ctx, name, ty);
@@ -1000,6 +1007,25 @@ pub mod ops {
                 .attributes
                 .get::<AlignmentAttr>(&key)
                 .map(|a| a.0 as u64)
+        }
+
+        fn set_initializer_hex(&self, ctx: &mut Context, hex: &str) {
+            let key = Identifier::try_new(GLOBAL_INITIALIZER_HEX_KEY.to_string())
+                .expect("valid identifier");
+            self.get_operation()
+                .deref_mut(ctx)
+                .attributes
+                .set(key, StringAttr::new(hex.to_string()));
+        }
+
+        fn initializer_hex(&self, ctx: &Context) -> Option<String> {
+            let key = Identifier::try_new(GLOBAL_INITIALIZER_HEX_KEY.to_string())
+                .expect("valid identifier");
+            self.get_operation()
+                .deref(ctx)
+                .attributes
+                .get::<StringAttr>(&key)
+                .map(|attr| String::from((*attr).clone()))
         }
     }
 

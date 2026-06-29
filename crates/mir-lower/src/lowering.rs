@@ -34,7 +34,9 @@ use crate::convert::types::{
 };
 
 use dialect_mir::ops::MirFuncOp;
-use dialect_mir::types::{MirDisjointSliceType, MirPtrType, MirSliceType, MirStructType};
+use dialect_mir::types::{
+    MirDisjointSliceType, MirPtrType, MirSliceType, MirStructType, MirUnionType,
+};
 use llvm_export::ops as llvm;
 use pliron::{
     basic_block::BasicBlock,
@@ -49,7 +51,7 @@ use pliron::{
     op::Op,
     operation::Operation,
     result::Result,
-    r#type::{TypeObj, Typed},
+    r#type::{TypeHandle, Typed},
     value::Value,
 };
 
@@ -273,7 +275,7 @@ fn propagate_alwaysinline_attr(
 /// per-argument and emits the matching reconstruction sequence.
 fn build_entry_prologue(
     ctx: &mut Context,
-    mir_arg_types: &[Ptr<TypeObj>],
+    mir_arg_types: &[TypeHandle],
     llvm_entry: Ptr<BasicBlock>,
     is_kernel_entry: bool,
 ) -> std::result::Result<Vec<Value>, anyhow::Error> {
@@ -318,6 +320,13 @@ fn build_entry_prologue(
                 last_op = Some(new_last);
                 result_args.push(val);
             }
+            ReconstructKind::Zst => {
+                let llvm_ty = convert_type(ctx, mir_ty)?;
+                let undef = llvm::UndefOp::new(ctx, llvm_ty).get_operation();
+                insert_op_sequentially(undef, llvm_entry, last_op, ctx);
+                last_op = Some(undef);
+                result_args.push(undef.deref(ctx).get_result(0));
+            }
             ReconstructKind::None => {
                 if llvm_arg_idx >= llvm_args.len() {
                     return Err(anyhow::anyhow!(
@@ -343,6 +352,8 @@ enum ReconstructKind {
     Slice,
     /// A struct type with N non-ZST fields, flattened to N separate arguments.
     Struct(usize),
+    /// A zero-sized argument omitted from the LLVM signature.
+    Zst,
     /// A simple type that passes through without reconstruction.
     None,
 }
@@ -356,9 +367,13 @@ enum ReconstructKind {
 /// both ABIs.
 fn classify_argument_type(
     ctx: &mut Context,
-    arg_ty: Ptr<TypeObj>,
+    arg_ty: TypeHandle,
     is_kernel_entry: bool,
 ) -> ReconstructKind {
+    if convert_type(ctx, arg_ty).is_ok_and(|llvm_ty| is_zero_sized_type(ctx, llvm_ty)) {
+        return ReconstructKind::Zst;
+    }
+
     let (is_slice, struct_fields) = {
         let arg_ty_ref = arg_ty.deref(ctx);
         let is_slice = arg_ty_ref.is::<MirSliceType>() || arg_ty_ref.is::<MirDisjointSliceType>();
@@ -384,11 +399,7 @@ fn classify_argument_type(
             .count();
 
         if non_zst_count == 0 {
-            // Whole struct is ZST: `convert_function_type` skipped it,
-            // so no LLVM args were emitted. We still need to produce an
-            // undef value for the MIR entry block's slot — `Struct(0)`
-            // builds that via the existing reconstruct_struct path.
-            ReconstructKind::Struct(0)
+            ReconstructKind::Zst
         } else if is_kernel_entry {
             // Kernel boundary: struct arrived as a single byval value,
             // so the MIR entry block can consume it directly without
@@ -414,7 +425,7 @@ fn reconstruct_slice(
     ctx: &mut Context,
     llvm_block: Ptr<BasicBlock>,
     prev_op: Option<Ptr<Operation>>,
-    mir_ty: Ptr<TypeObj>,
+    mir_ty: TypeHandle,
     ptr_val: Value,
     len_val: Value,
 ) -> std::result::Result<(Value, Ptr<Operation>), anyhow::Error> {
@@ -453,7 +464,7 @@ fn reconstruct_struct(
     ctx: &mut Context,
     llvm_block: Ptr<BasicBlock>,
     prev_op: Option<Ptr<Operation>>,
-    mir_ty: Ptr<TypeObj>,
+    mir_ty: TypeHandle,
     field_vals: &[Value],
 ) -> std::result::Result<(Value, Ptr<Operation>), anyhow::Error> {
     let layout = {
@@ -572,7 +583,7 @@ fn anyhow_to_pliron(e: anyhow::Error) -> pliron::result::Error {
 /// lowers to `{ i8, [7 x i8] }` looks like "align 1" to LLVM even when
 /// Rust requires align 8. Memory ops touching such values get stamped
 /// with the recorded alignment instead.
-fn aggregate_over_align(ctx: &Context, ty: Ptr<TypeObj>) -> Option<u64> {
+fn aggregate_over_align(ctx: &Context, ty: TypeHandle) -> Option<u64> {
     let ty_ref = ty.deref(ctx);
     if let Some(s) = ty_ref.downcast_ref::<MirStructType>() {
         return Some(s.abi_align).filter(|a| *a > 0);
@@ -580,13 +591,15 @@ fn aggregate_over_align(ctx: &Context, ty: Ptr<TypeObj>) -> Option<u64> {
     if let Some(e) = ty_ref.downcast_ref::<dialect_mir::types::MirEnumType>() {
         return Some(e.abi_align()).filter(|a| *a > 0);
     }
+    if let Some(u) = ty_ref.downcast_ref::<MirUnionType>() {
+        return Some(u.abi_align()).filter(|a| *a > 0);
+    }
     None
 }
 
 /// Stamp the true ABI alignment onto every `mir.load`, `mir.store`,
 /// `mir.alloca`, and `mir.ref` whose accessed/allocated type carries a
-/// rustc ABI alignment in `MirStructType.abi_align` /
-/// `MirEnumType.abi_align`.
+/// rustc ABI alignment in `MirStructType`, `MirEnumType`, or `MirUnionType`.
 ///
 /// Must run BEFORE `inline_region` moves the blocks and BEFORE dialect
 /// conversion replaces MIR types with LLVM types, since the alignment

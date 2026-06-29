@@ -101,7 +101,9 @@ mod bf16x2;
 mod clc;
 mod cluster;
 mod convert;
+mod cp_async;
 mod debug;
+mod dotprod;
 mod grid;
 mod mbarrier;
 mod stmatrix;
@@ -120,7 +122,9 @@ pub use bf16x2::*;
 pub use clc::*;
 pub use cluster::*;
 pub use convert::*;
+pub use cp_async::*;
 pub use debug::*;
+pub use dotprod::*;
 pub use grid::*;
 pub use mbarrier::*;
 pub use stmatrix::*;
@@ -140,6 +144,7 @@ pub fn register(ctx: &mut Context) {
     bf16x2::register(ctx);
     clc::register(ctx);
     convert::register(ctx);
+    cp_async::register(ctx);
     thread::register(ctx);
     warp::register(ctx);
     cluster::register(ctx);
@@ -150,4 +155,5 @@ pub fn register(ctx: &mut Context) {
     tcgen05::register(ctx);
     stmatrix::register(ctx);
     debug::register(ctx);
+    dotprod::register(ctx);
 }

@@ -12,6 +12,7 @@ pub use cuda_macros::{
 };
 
 // Re-export for convenience
+pub mod async_copy;
 pub mod atomic;
 pub mod barrier;
 pub mod bf16x2;
@@ -23,6 +24,7 @@ pub mod cooperative_groups;
 pub mod cusimd;
 pub mod debug;
 pub mod disjoint;
+pub mod dotprod;
 pub mod fence;
 pub mod grid;
 pub mod ptx;
