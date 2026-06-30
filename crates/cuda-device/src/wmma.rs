@@ -162,3 +162,114 @@ pub unsafe fn ldmatrix_x4_trans(smem_ptr: *const u32) -> [u32; 4] {
     let _ = smem_ptr;
     unreachable!("ldmatrix_x4_trans called outside CUDA kernel context")
 }
+
+/// Warp MMA: D = A x B + C (m16n8k32, s32 output, u8 inputs).
+///
+/// Performs a 16x8x32 matrix multiplication using tensor cores with unsigned
+/// int8 input fragments and signed int32 accumulator.
+///
+/// # Matrix Dimensions
+///
+/// - **A**: 16x32 (row-major, u8), distributed as 4 x u32 per thread
+/// - **B**: 32x8 (col-major, u8), distributed as 2 x u32 per thread
+/// - **D/C**: 16x8 (s32 accumulator), distributed as 4 x i32 per thread
+///
+/// # Parameters
+///
+/// - `acc`: Mutable accumulator (4 x i32, read-modify-write)
+/// - `a`: A fragment (4 x u32, each u32 = 4 packed u8)
+/// - `b`: B fragment (2 x u32, each u32 = 4 packed u8)
+///
+/// # PTX
+///
+/// ```ptx
+/// mma.sync.aligned.m16n8k32.row.col.s32.u8.u8.s32
+///     {%d0, %d1, %d2, %d3},
+///     {%a0, %a1, %a2, %a3},
+///     {%b0, %b1},
+///     {%c0, %c1, %c2, %c3};
+/// ```
+///
+/// # Safety
+///
+/// - Must be called by all threads in a warp
+/// - Must be called from within a CUDA kernel context on sm_80+
+#[inline(never)]
+pub unsafe fn mma_m16n8k32_s32_u8(acc: &mut [i32; 4], a: &[u32; 4], b: &[u32; 2]) {
+    let _ = (acc, a, b);
+    unreachable!("mma_m16n8k32_s32_u8 called outside CUDA kernel context")
+}
+
+/// Warp MMA: D = A x B + C (m16n8k16, s32 output, s8 inputs).
+///
+/// Performs a 16x8x16 matrix multiplication using tensor cores with signed
+/// int8 input fragments and signed int32 accumulator.
+///
+/// # Matrix Dimensions
+///
+/// - **A**: 16x16 (row-major, s8), distributed as 2 x u32 per thread
+/// - **B**: 16x8 (col-major, s8), distributed as 1 x u32 per thread
+/// - **D/C**: 16x8 (s32 accumulator), distributed as 4 x i32 per thread
+///
+/// # Parameters
+///
+/// - `acc`: Mutable accumulator (4 x i32, read-modify-write)
+/// - `a`: A fragment (2 x u32, each u32 = 4 packed s8)
+/// - `b`: B fragment (1 x u32, containing 4 packed s8)
+///
+/// # PTX
+///
+/// ```ptx
+/// mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32
+///     {%d0, %d1, %d2, %d3},
+///     {%a0, %a1},
+///     {%b0},
+///     {%c0, %c1, %c2, %c3};
+/// ```
+///
+/// # Safety
+///
+/// - Must be called by all threads in a warp
+/// - Must be called from within a CUDA kernel context on sm_80+
+#[inline(never)]
+pub unsafe fn mma_m16n8k16_s32_s8(acc: &mut [i32; 4], a: &[u32; 2], b: &u32) {
+    let _ = (acc, a, b);
+    unreachable!("mma_m16n8k16_s32_s8 called outside CUDA kernel context")
+}
+
+/// Warp MMA: D = A x B + C (m16n8k16, s32 output, u8 inputs).
+///
+/// Performs a 16x8x16 matrix multiplication using tensor cores with unsigned
+/// int8 input fragments and signed int32 accumulator.
+///
+/// # Matrix Dimensions
+///
+/// - **A**: 16x16 (row-major, u8), distributed as 2 x u32 per thread
+/// - **B**: 16x8 (col-major, u8), distributed as 1 x u32 per thread
+/// - **D/C**: 16x8 (s32 accumulator), distributed as 4 x i32 per thread
+///
+/// # Parameters
+///
+/// - `acc`: Mutable accumulator (4 x i32, read-modify-write)
+/// - `a`: A fragment (2 x u32, each u32 = 4 packed u8)
+/// - `b`: B fragment (1 x u32, containing 4 packed u8)
+///
+/// # PTX
+///
+/// ```ptx
+/// mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32
+///     {%d0, %d1, %d2, %d3},
+///     {%a0, %a1},
+///     {%b0},
+///     {%c0, %c1, %c2, %c3};
+/// ```
+///
+/// # Safety
+///
+/// - Must be called by all threads in a warp
+/// - Must be called from within a CUDA kernel context on sm_80+
+#[inline(never)]
+pub unsafe fn mma_m16n8k16_s32_u8(acc: &mut [i32; 4], a: &[u32; 2], b: &u32) {
+    let _ = (acc, a, b);
+    unreachable!("mma_m16n8k16_s32_u8 called outside CUDA kernel context")
+}

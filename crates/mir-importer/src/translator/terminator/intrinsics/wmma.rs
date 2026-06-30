@@ -87,3 +87,81 @@ pub fn emit_movmatrix_trans_b16(
         "movmatrix_trans_b16 call without target block",
     )
 }
+
+/// Emit `mma_m16n8k32_s32_u8`: u8 m16n8k32.
+pub fn emit_mma_m16n8k32_s32_u8(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_mma_3ptr::<MmaM16N8K32S32U8Op>(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        "mma_m16n8k32_s32_u8",
+    )
+}
+
+/// Emit `mma_m16n8k16_s32_s8`: s8 m16n8k16.
+pub fn emit_mma_m16n8k16_s32_s8(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_mma_3ptr::<MmaM16N8K16S32S8Op>(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        "mma_m16n8k16_s32_s8",
+    )
+}
+
+/// Emit `mma_m16n8k16_s32_u8`: u8 m16n8k16.
+pub fn emit_mma_m16n8k16_s32_u8(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_mma_3ptr::<MmaM16N8K16S32U8Op>(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        "mma_m16n8k16_s32_u8",
+    )
+}
