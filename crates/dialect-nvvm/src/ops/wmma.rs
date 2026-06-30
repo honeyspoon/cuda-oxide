@@ -71,6 +71,114 @@ impl Verify for MovmatrixTransB16Op {
     }
 }
 
+/// Warp MMA: m16n8k8, D=f32, A/B=bf16, C=f32 (smaller k variant).
+///
+/// Operands: `acc_ptr`, `a_ptr` (ptr to `[u32; 2]`), `b_ptr` (ptr to `u32`)
+#[pliron_op(
+    name = "nvvm.mma_m16n8k8_f32_bf16",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<3>, NResultsInterface<0>],
+)]
+pub struct MmaM16N8K8F32Bf16Op;
+
+impl MmaM16N8K8F32Bf16Op {
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaM16N8K8F32Bf16Op { op }
+    }
+}
+
+/// Warp MMA: m16n8k4, D=f32, A/B=tf32, C=f32 (smaller k variant).
+///
+/// Operands: `acc_ptr`, `a_ptr` (ptr to `[u32; 2]`), `b_ptr` (ptr to `u32`)
+#[pliron_op(
+    name = "nvvm.mma_m16n8k4_f32_tf32",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<3>, NResultsInterface<0>],
+)]
+pub struct MmaM16N8K4F32Tf32Op;
+
+impl MmaM16N8K4F32Tf32Op {
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaM16N8K4F32Tf32Op { op }
+    }
+}
+
+/// Warp MMA: m16n8k16, D=f32, A/B=f16, C=f32.
+///
+/// Operands: `acc_ptr`, `a_ptr` (ptr to `[u32; 4]`), `b_ptr` (ptr to `[u32; 2]`)
+#[pliron_op(
+    name = "nvvm.mma_m16n8k16_f32_f16",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<3>, NResultsInterface<0>],
+)]
+pub struct MmaM16N8K16F32F16Op;
+
+impl MmaM16N8K16F32F16Op {
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaM16N8K16F32F16Op { op }
+    }
+}
+
+/// Warp MMA: m16n8k16, D=f16, A/B=f16, C=f16.
+///
+/// Operands: `acc_ptr`, `a_ptr` (ptr to `[u32; 4]`), `b_ptr` (ptr to `[u32; 2]`)
+#[pliron_op(
+    name = "nvvm.mma_m16n8k16_f16",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<3>, NResultsInterface<0>],
+)]
+pub struct MmaM16N8K16F16Op;
+
+impl MmaM16N8K16F16Op {
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaM16N8K16F16Op { op }
+    }
+}
+
+/// Warp MMA: m16n8k16, D=f16, A/B=f16, C=f32 (mixed accumulator).
+///
+/// Operands: `d_ptr`, `a_ptr` (ptr to `[u32; 4]`), `b_ptr` (ptr to `[u32; 2]`), `c_ptr`
+#[pliron_op(
+    name = "nvvm.mma_m16n8k16_f16_f32acc",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<4>, NResultsInterface<0>],
+)]
+pub struct MmaM16N8K16F16F32AccOp;
+
+impl MmaM16N8K16F16F32AccOp {
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaM16N8K16F16F32AccOp { op }
+    }
+}
+
+/// Warp MMA: m16n8k16, D=f32, A/B=f16, C=f16 (mixed accumulator).
+///
+/// Operands: `d_ptr`, `a_ptr` (ptr to `[u32; 4]`), `b_ptr` (ptr to `[u32; 2]`), `c_ptr`
+#[pliron_op(
+    name = "nvvm.mma_m16n8k16_f32_f16acc",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<4>, NResultsInterface<0>],
+)]
+pub struct MmaM16N8K16F32F16AccOp;
+
+impl MmaM16N8K16F32F16AccOp {
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaM16N8K16F32F16AccOp { op }
+    }
+}
+
 pub(super) fn register(ctx: &mut Context) {
     MovmatrixTransB16Op::register(ctx);
+    MmaM16N8K8F32Bf16Op::register(ctx);
+    MmaM16N8K4F32Tf32Op::register(ctx);
+    MmaM16N8K16F32F16Op::register(ctx);
+    MmaM16N8K16F16Op::register(ctx);
+    MmaM16N8K16F16F32AccOp::register(ctx);
+    MmaM16N8K16F32F16AccOp::register(ctx);
 }

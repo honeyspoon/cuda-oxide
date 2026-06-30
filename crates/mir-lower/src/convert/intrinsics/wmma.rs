@@ -52,3 +52,241 @@ pub(crate) fn convert_movmatrix_trans_b16(
     rewriter.replace_operation(ctx, op, asm_op);
     Ok(())
 }
+
+/// Convert `mma_m16n8k8_f32_bf16` to inline PTX assembly.
+///
+/// Smaller k variant: A has 2 registers, B has 1 register.
+pub(crate) fn convert_mma_m16n8k8_f32_bf16(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+) -> Result<()> {
+    convert_mma_sync(
+        ctx,
+        rewriter,
+        op,
+        "\
+        .reg .f32 c<4>; \
+        .reg .f32 d<4>; \
+        .reg .b32 a<2>; \
+        .reg .b32 b0; \
+        ld.f32 c0, [$0]; \
+        ld.f32 c1, [$0+4]; \
+        ld.f32 c2, [$0+8]; \
+        ld.f32 c3, [$0+12]; \
+        ld.b32 a0, [$1]; \
+        ld.b32 a1, [$1+4]; \
+        ld.b32 b0, [$2]; \
+        mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32 \
+            {d0, d1, d2, d3}, \
+            {a0, a1}, \
+            {b0}, \
+            {c0, c1, c2, c3}; \
+        st.f32 [$0], d0; \
+        st.f32 [$0+4], d1; \
+        st.f32 [$0+8], d2; \
+        st.f32 [$0+12], d3;",
+        "l,l,l,~{memory}",
+        3,
+        "mma_m16n8k8_f32_bf16",
+    )
+}
+
+/// Convert `mma_m16n8k4_f32_tf32` to inline PTX assembly.
+///
+/// Smaller k variant: A has 2 registers, B has 1 register.
+pub(crate) fn convert_mma_m16n8k4_f32_tf32(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+) -> Result<()> {
+    convert_mma_sync(
+        ctx,
+        rewriter,
+        op,
+        "\
+        .reg .f32 c<4>; \
+        .reg .f32 d<4>; \
+        .reg .b32 a<2>; \
+        .reg .b32 b0; \
+        ld.f32 c0, [$0]; \
+        ld.f32 c1, [$0+4]; \
+        ld.f32 c2, [$0+8]; \
+        ld.f32 c3, [$0+12]; \
+        ld.b32 a0, [$1]; \
+        ld.b32 a1, [$1+4]; \
+        ld.b32 b0, [$2]; \
+        mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32 \
+            {d0, d1, d2, d3}, \
+            {a0, a1}, \
+            {b0}, \
+            {c0, c1, c2, c3}; \
+        st.f32 [$0], d0; \
+        st.f32 [$0+4], d1; \
+        st.f32 [$0+8], d2; \
+        st.f32 [$0+12], d3;",
+        "l,l,l,~{memory}",
+        3,
+        "mma_m16n8k4_f32_tf32",
+    )
+}
+
+/// Convert `mma_m16n8k16_f32_f16` to inline PTX assembly.
+///
+/// f16 inputs (A=4 regs, B=2 regs), f32 accumulator (read-modify-write via acc_ptr).
+pub(crate) fn convert_mma_m16n8k16_f32_f16(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+) -> Result<()> {
+    convert_mma_sync(
+        ctx,
+        rewriter,
+        op,
+        "\
+        .reg .f32 c<4>; \
+        .reg .f32 d<4>; \
+        .reg .b32 a<4>; \
+        .reg .b32 b<2>; \
+        ld.f32 c0, [$0]; \
+        ld.f32 c1, [$0+4]; \
+        ld.f32 c2, [$0+8]; \
+        ld.f32 c3, [$0+12]; \
+        ld.b32 a0, [$1]; \
+        ld.b32 a1, [$1+4]; \
+        ld.b32 a2, [$1+8]; \
+        ld.b32 a3, [$1+12]; \
+        ld.b32 b0, [$2]; \
+        ld.b32 b1, [$2+4]; \
+        mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 \
+            {d0, d1, d2, d3}, \
+            {a0, a1, a2, a3}, \
+            {b0, b1}, \
+            {c0, c1, c2, c3}; \
+        st.f32 [$0], d0; \
+        st.f32 [$0+4], d1; \
+        st.f32 [$0+8], d2; \
+        st.f32 [$0+12], d3;",
+        "l,l,l,~{memory}",
+        3,
+        "mma_m16n8k16_f32_f16",
+    )
+}
+
+/// Convert `mma_m16n8k16_f16` to inline PTX assembly.
+///
+/// f16 inputs (A=4 regs, B=2 regs), f16 accumulator (read-modify-write via acc_ptr).
+pub(crate) fn convert_mma_m16n8k16_f16(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+) -> Result<()> {
+    convert_mma_sync(
+        ctx,
+        rewriter,
+        op,
+        "\
+        .reg .b32 c<2>; \
+        .reg .b32 d<2>; \
+        .reg .b32 a<4>; \
+        .reg .b32 b<2>; \
+        ld.b32 c0, [$0]; \
+        ld.b32 c1, [$0+4]; \
+        ld.b32 a0, [$1]; \
+        ld.b32 a1, [$1+4]; \
+        ld.b32 a2, [$1+8]; \
+        ld.b32 a3, [$1+12]; \
+        ld.b32 b0, [$2]; \
+        ld.b32 b1, [$2+4]; \
+        mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 \
+            {d0, d1}, \
+            {a0, a1, a2, a3}, \
+            {b0, b1}, \
+            {c0, c1}; \
+        st.b32 [$0], d0; \
+        st.b32 [$0+4], d1;",
+        "l,l,l,~{memory}",
+        3,
+        "mma_m16n8k16_f16",
+    )
+}
+
+/// Convert `mma_m16n8k16_f16_f32acc` to inline PTX assembly.
+///
+/// D=f16 (2 packed u32), C=f32 (4 floats). 4 operands: d_ptr, a_ptr, b_ptr, c_ptr.
+pub(crate) fn convert_mma_m16n8k16_f16_f32acc(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+) -> Result<()> {
+    convert_mma_sync(
+        ctx,
+        rewriter,
+        op,
+        "\
+        .reg .f32 c<4>; \
+        .reg .b32 d<2>; \
+        .reg .b32 a<4>; \
+        .reg .b32 b<2>; \
+        ld.f32 c0, [$3]; \
+        ld.f32 c1, [$3+4]; \
+        ld.f32 c2, [$3+8]; \
+        ld.f32 c3, [$3+12]; \
+        ld.b32 a0, [$1]; \
+        ld.b32 a1, [$1+4]; \
+        ld.b32 a2, [$1+8]; \
+        ld.b32 a3, [$1+12]; \
+        ld.b32 b0, [$2]; \
+        ld.b32 b1, [$2+4]; \
+        mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f32 \
+            {d0, d1}, \
+            {a0, a1, a2, a3}, \
+            {b0, b1}, \
+            {c0, c1, c2, c3}; \
+        st.b32 [$0], d0; \
+        st.b32 [$0+4], d1;",
+        "l,l,l,l,~{memory}",
+        4,
+        "mma_m16n8k16_f16_f32acc",
+    )
+}
+
+/// Convert `mma_m16n8k16_f32_f16acc` to inline PTX assembly.
+///
+/// D=f32 (4 floats), C=f16 (2 packed u32). 4 operands: d_ptr, a_ptr, b_ptr, c_ptr.
+pub(crate) fn convert_mma_m16n8k16_f32_f16acc(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+) -> Result<()> {
+    convert_mma_sync(
+        ctx,
+        rewriter,
+        op,
+        "\
+        .reg .b32 c<2>; \
+        .reg .f32 d<4>; \
+        .reg .b32 a<4>; \
+        .reg .b32 b<2>; \
+        ld.b32 c0, [$3]; \
+        ld.b32 c1, [$3+4]; \
+        ld.b32 a0, [$1]; \
+        ld.b32 a1, [$1+4]; \
+        ld.b32 a2, [$1+8]; \
+        ld.b32 a3, [$1+12]; \
+        ld.b32 b0, [$2]; \
+        ld.b32 b1, [$2+4]; \
+        mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f16 \
+            {d0, d1, d2, d3}, \
+            {a0, a1, a2, a3}, \
+            {b0, b1}, \
+            {c0, c1}; \
+        st.f32 [$0], d0; \
+        st.f32 [$0+4], d1; \
+        st.f32 [$0+8], d2; \
+        st.f32 [$0+12], d3;",
+        "l,l,l,l,~{memory}",
+        4,
+        "mma_m16n8k16_f32_f16acc",
+    )
+}
