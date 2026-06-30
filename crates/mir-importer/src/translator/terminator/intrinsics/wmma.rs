@@ -87,3 +87,119 @@ pub fn emit_movmatrix_trans_b16(
         "movmatrix_trans_b16 call without target block",
     )
 }
+
+/// Emit `mma_m16n8k32_s32_s4`: signed int4 MMA, k=32.
+///
+/// Args: `(acc: &mut [i32; 4], a: &[u32; 2], b: &u32)`
+/// Returns: void (result written through `acc` pointer)
+pub fn emit_mma_m16n8k32_s32_s4(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_mma_3ptr::<MmaM16N8K32S32S4Op>(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        "mma_m16n8k32_s32_s4",
+    )
+}
+
+/// Emit `mma_m16n8k32_s32_u4`: unsigned int4 MMA, k=32.
+///
+/// Args: `(acc: &mut [i32; 4], a: &[u32; 2], b: &u32)`
+/// Returns: void (result written through `acc` pointer)
+pub fn emit_mma_m16n8k32_s32_u4(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_mma_3ptr::<MmaM16N8K32S32U4Op>(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        "mma_m16n8k32_s32_u4",
+    )
+}
+
+/// Emit `mma_m16n8k64_s32_s4`: signed int4 MMA, k=64.
+///
+/// Args: `(acc: &mut [i32; 4], a: &[u32; 4], b: &[u32; 2])`
+/// Returns: void (result written through `acc` pointer)
+pub fn emit_mma_m16n8k64_s32_s4(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_mma_3ptr::<MmaM16N8K64S32S4Op>(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        "mma_m16n8k64_s32_s4",
+    )
+}
+
+/// Emit `mma_m16n8k64_s32_u4`: unsigned int4 MMA, k=64.
+///
+/// Args: `(acc: &mut [i32; 4], a: &[u32; 4], b: &[u32; 2])`
+/// Returns: void (result written through `acc` pointer)
+pub fn emit_mma_m16n8k64_s32_u4(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_mma_3ptr::<MmaM16N8K64S32U4Op>(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        "mma_m16n8k64_s32_u4",
+    )
+}

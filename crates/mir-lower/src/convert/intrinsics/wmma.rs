@@ -52,3 +52,107 @@ pub(crate) fn convert_movmatrix_trans_b16(
     rewriter.replace_operation(ctx, op, asm_op);
     Ok(())
 }
+
+/// Convert `mma_m16n8k32_s32_s4` to inline PTX assembly.
+pub(crate) fn convert_mma_m16n8k32_s32_s4(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    let asm = "\
+        .reg .b32 c<4>; .reg .b32 d<4>; .reg .b32 a<2>; .reg .b32 b0; \
+        ld.b32 c0, [$0]; ld.b32 c1, [$0+4]; ld.b32 c2, [$0+8]; ld.b32 c3, [$0+12]; \
+        ld.b32 a0, [$1]; ld.b32 a1, [$1+4]; \
+        ld.b32 b0, [$2]; \
+        mma.sync.aligned.m16n8k32.row.col.s32.s4.s4.s32 {d0, d1, d2, d3}, {a0, a1}, {b0}, {c0, c1, c2, c3}; \
+        st.b32 [$0], d0; st.b32 [$0+4], d1; st.b32 [$0+8], d2; st.b32 [$0+12], d3;";
+
+    convert_mma_int4(
+        ctx,
+        rewriter,
+        op,
+        asm,
+        "l,l,l,~{memory}",
+        3,
+        "mma_m16n8k32_s32_s4",
+    )
+}
+
+/// Convert `mma_m16n8k32_s32_u4` to inline PTX assembly.
+pub(crate) fn convert_mma_m16n8k32_s32_u4(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    let asm = "\
+        .reg .b32 c<4>; .reg .b32 d<4>; .reg .b32 a<2>; .reg .b32 b0; \
+        ld.b32 c0, [$0]; ld.b32 c1, [$0+4]; ld.b32 c2, [$0+8]; ld.b32 c3, [$0+12]; \
+        ld.b32 a0, [$1]; ld.b32 a1, [$1+4]; \
+        ld.b32 b0, [$2]; \
+        mma.sync.aligned.m16n8k32.row.col.s32.u4.u4.s32 {d0, d1, d2, d3}, {a0, a1}, {b0}, {c0, c1, c2, c3}; \
+        st.b32 [$0], d0; st.b32 [$0+4], d1; st.b32 [$0+8], d2; st.b32 [$0+12], d3;";
+
+    convert_mma_int4(
+        ctx,
+        rewriter,
+        op,
+        asm,
+        "l,l,l,~{memory}",
+        3,
+        "mma_m16n8k32_s32_u4",
+    )
+}
+
+/// Convert `mma_m16n8k64_s32_s4` to inline PTX assembly.
+pub(crate) fn convert_mma_m16n8k64_s32_s4(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    let asm = "\
+        .reg .b32 c<4>; .reg .b32 d<4>; .reg .b32 a<4>; .reg .b32 b<2>; \
+        ld.b32 c0, [$0]; ld.b32 c1, [$0+4]; ld.b32 c2, [$0+8]; ld.b32 c3, [$0+12]; \
+        ld.b32 a0, [$1]; ld.b32 a1, [$1+4]; ld.b32 a2, [$1+8]; ld.b32 a3, [$1+12]; \
+        ld.b32 b0, [$2]; ld.b32 b1, [$2+4]; \
+        mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 {d0, d1, d2, d3}, {a0, a1, a2, a3}, {b0, b1}, {c0, c1, c2, c3}; \
+        st.b32 [$0], d0; st.b32 [$0+4], d1; st.b32 [$0+8], d2; st.b32 [$0+12], d3;";
+
+    convert_mma_int4(
+        ctx,
+        rewriter,
+        op,
+        asm,
+        "l,l,l,~{memory}",
+        3,
+        "mma_m16n8k64_s32_s4",
+    )
+}
+
+/// Convert `mma_m16n8k64_s32_u4` to inline PTX assembly.
+pub(crate) fn convert_mma_m16n8k64_s32_u4(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    let asm = "\
+        .reg .b32 c<4>; .reg .b32 d<4>; .reg .b32 a<4>; .reg .b32 b<2>; \
+        ld.b32 c0, [$0]; ld.b32 c1, [$0+4]; ld.b32 c2, [$0+8]; ld.b32 c3, [$0+12]; \
+        ld.b32 a0, [$1]; ld.b32 a1, [$1+4]; ld.b32 a2, [$1+8]; ld.b32 a3, [$1+12]; \
+        ld.b32 b0, [$2]; ld.b32 b1, [$2+4]; \
+        mma.sync.aligned.m16n8k64.row.col.s32.u4.u4.s32 {d0, d1, d2, d3}, {a0, a1, a2, a3}, {b0, b1}, {c0, c1, c2, c3}; \
+        st.b32 [$0], d0; st.b32 [$0+4], d1; st.b32 [$0+8], d2; st.b32 [$0+12], d3;";
+
+    convert_mma_int4(
+        ctx,
+        rewriter,
+        op,
+        asm,
+        "l,l,l,~{memory}",
+        3,
+        "mma_m16n8k64_s32_u4",
+    )
+}
