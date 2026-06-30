@@ -3656,6 +3656,20 @@ fn try_dispatch_intrinsic(
         )?)),
 
         // =================================================================
+        // WMMA (from intrinsics::wmma)
+        // =================================================================
+        "cuda_device::wmma::mma_m16n8k8_f32_bf16" => {
+            Ok(Some(intrinsics::wmma::emit_mma_m16n8k8_f32_bf16(
+                ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+            )?))
+        }
+        "cuda_device::wmma::mma_m16n8k4_f32_tf32" => {
+            Ok(Some(intrinsics::wmma::emit_mma_m16n8k4_f32_tf32(
+                ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+            )?))
+        }
+
+        // =================================================================
         // WGMMA (from intrinsics::wgmma)
         // =================================================================
         "cuda_device::wgmma::wgmma_fence" => Ok(Some(intrinsics::wgmma::emit_wgmma_fence(

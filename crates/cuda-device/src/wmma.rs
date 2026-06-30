@@ -162,3 +162,45 @@ pub unsafe fn ldmatrix_x4_trans(smem_ptr: *const u32) -> [u32; 4] {
     let _ = smem_ptr;
     unreachable!("ldmatrix_x4_trans called outside CUDA kernel context")
 }
+
+/// Warp MMA: D = A x B + C (m16n8k8, f32 output, bf16 inputs).
+///
+/// Performs a 16x8x8 matrix multiplication using tensor cores with bf16 input
+/// fragments and f32 accumulator. Smaller k variant of m16n8k16.
+///
+/// # Matrix Dimensions
+///
+/// - **A**: 16x8 (row-major, bf16), distributed as 2 x u32 per thread
+/// - **B**: 8x8 (col-major, bf16), distributed as 1 x u32 per thread
+/// - **D/C**: 16x8 (f32 accumulator), distributed as 4 x f32 per thread
+///
+/// # Safety
+///
+/// - Must be called by all threads in a warp
+/// - Must be called from within a CUDA kernel context on sm_80+
+#[inline(never)]
+pub unsafe fn mma_m16n8k8_f32_bf16(acc: &mut [f32; 4], a: &[u32; 2], b: &u32) {
+    let _ = (acc, a, b);
+    unreachable!("mma_m16n8k8_f32_bf16 called outside CUDA kernel context")
+}
+
+/// Warp MMA: D = A x B + C (m16n8k4, f32 output, tf32 inputs).
+///
+/// Performs a 16x8x4 matrix multiplication using tensor cores with tf32 input
+/// fragments and f32 accumulator. Smaller k variant of m16n8k8.
+///
+/// # Matrix Dimensions
+///
+/// - **A**: 16x4 (row-major, tf32), distributed as 2 x u32 per thread
+/// - **B**: 4x8 (col-major, tf32), distributed as 1 x u32 per thread
+/// - **D/C**: 16x8 (f32 accumulator), distributed as 4 x f32 per thread
+///
+/// # Safety
+///
+/// - Must be called by all threads in a warp
+/// - Must be called from within a CUDA kernel context on sm_80+
+#[inline(never)]
+pub unsafe fn mma_m16n8k4_f32_tf32(acc: &mut [f32; 4], a: &[u32; 2], b: &u32) {
+    let _ = (acc, a, b);
+    unreachable!("mma_m16n8k4_f32_tf32 called outside CUDA kernel context")
+}

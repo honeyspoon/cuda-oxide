@@ -87,3 +87,55 @@ pub fn emit_movmatrix_trans_b16(
         "movmatrix_trans_b16 call without target block",
     )
 }
+
+/// Emit `mma_m16n8k8_f32_bf16`: bf16 m16n8k8 (smaller k).
+pub fn emit_mma_m16n8k8_f32_bf16(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_mma_3ptr::<MmaM16N8K8F32Bf16Op>(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        "mma_m16n8k8_f32_bf16",
+    )
+}
+
+/// Emit `mma_m16n8k4_f32_tf32`: tf32 m16n8k4 (smaller k).
+pub fn emit_mma_m16n8k4_f32_tf32(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_mma_3ptr::<MmaM16N8K4F32Tf32Op>(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        "mma_m16n8k4_f32_tf32",
+    )
+}
