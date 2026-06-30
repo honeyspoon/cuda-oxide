@@ -18,6 +18,8 @@ use pliron::location::{Located, Location};
 use pliron::op::Op;
 use pliron::operation::Operation;
 use rustc_public::mir;
+use dialect_nvvm::ops::MmaM16N8K128S32B1Op;
+use dialect_nvvm::ops::MmaM16N8K256S32B1Op;
 
 /// Emit movmatrix_trans_b16: in-register 8×8 matrix transpose.
 ///
@@ -85,5 +87,75 @@ pub fn emit_movmatrix_trans_b16(
         block_map,
         loc,
         "movmatrix_trans_b16 call without target block",
+    )
+}
+
+/// Emit `mma_m16n8k128_s32_b1`: Warp MMA with s32 accumulator and b1 inputs (xor.popc).
+///
+/// Args:
+/// - `args[0]`: `&mut [i32; 4]` (accumulator pointer, read-modify-write)
+/// - `args[1]`: `&[u32; 2]` (A fragment pointer, packed b1)
+/// - `args[2]`: `&u32` (B fragment pointer, packed b1)
+///
+/// Returns: void (accumulator updated in-place)
+#[allow(clippy::too_many_arguments)]
+pub fn emit_mma_m16n8k128_s32_b1(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_mma_3ptr(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        MmaM16N8K128S32B1Op::get_concrete_op_info(),
+        "mma_m16n8k128_s32_b1",
+    )
+}
+
+/// Emit `mma_m16n8k256_s32_b1`: Warp MMA with s32 accumulator and b1 inputs (xor.popc).
+///
+/// Args:
+/// - `args[0]`: `&mut [i32; 4]` (accumulator pointer, read-modify-write)
+/// - `args[1]`: `&[u32; 4]` (A fragment pointer, packed b1)
+/// - `args[2]`: `&[u32; 2]` (B fragment pointer, packed b1)
+///
+/// Returns: void (accumulator updated in-place)
+#[allow(clippy::too_many_arguments)]
+pub fn emit_mma_m16n8k256_s32_b1(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_mma_3ptr(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        MmaM16N8K256S32B1Op::get_concrete_op_info(),
+        "mma_m16n8k256_s32_b1",
     )
 }

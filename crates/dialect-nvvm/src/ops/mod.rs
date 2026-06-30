@@ -159,6 +159,7 @@ pub fn register(ctx: &mut Context) {
     mbarrier::register(ctx);
     tma::register(ctx);
     wgmma::register(ctx);
+    wmma::register(ctx);
     tcgen05::register(ctx);
     shared::register(ctx);
     stmatrix::register(ctx);
