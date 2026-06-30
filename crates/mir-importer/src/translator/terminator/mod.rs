@@ -3656,6 +3656,14 @@ fn try_dispatch_intrinsic(
         )?)),
 
         // =================================================================
+        // WMMA (from intrinsics::wmma), Ampere+ mma.sync
+        // =================================================================
+        "cuda_device::wmma::mma_m16n8k32_s32_s8" => {
+            Ok(Some(intrinsics::wmma::emit_mma_m16n8k32_s32_s8(
+                ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+            )?))
+        }
+        // =================================================================
         // WGMMA (from intrinsics::wgmma)
         // =================================================================
         "cuda_device::wgmma::wgmma_fence" => Ok(Some(intrinsics::wgmma::emit_wgmma_fence(

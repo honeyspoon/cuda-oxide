@@ -71,6 +71,33 @@ impl Verify for MovmatrixTransB16Op {
     }
 }
 
+/// Warp MMA: m16n8k32 with s32 accumulator and s8 inputs.
+///
+/// # Operands
+///
+/// - `acc_ptr` (ptr): pointer to `[i32; 4]` accumulator (read-modify-write)
+/// - `a_ptr` (ptr): pointer to `[u32; 4]` A fragment (packed s8)
+/// - `b_ptr` (ptr): pointer to `[u32; 2]` B fragment (packed s8)
+///
+/// # Results
+///
+/// - None (accumulator updated in-place via pointer)
+#[pliron_op(
+    name = "nvvm.mma_m16n8k32_s32_s8",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<3>, NResultsInterface<0>],
+)]
+pub struct MmaM16N8K32S32S8Op;
+
+impl MmaM16N8K32S32S8Op {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaM16N8K32S32S8Op { op }
+    }
+}
+
 pub(super) fn register(ctx: &mut Context) {
     MovmatrixTransB16Op::register(ctx);
+    MmaM16N8K32S32S8Op::register(ctx);
 }
