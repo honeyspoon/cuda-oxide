@@ -3208,3 +3208,35 @@ fn test_ldmatrix_forms_return_registers_in_exact_convergent_memory_asm() -> Resu
 
     Ok(())
 }
+
+#[test]
+fn test_mma_m16n8k8_f32_tf32_lowers_to_inline_asm() -> Result<(), anyhow::Error> {
+    use llvm_export::types::PointerType;
+
+    let mut ctx = make_test_ctx();
+    let ptr_ty = PointerType::get(&mut ctx, 0);
+    let (module_ptr, entry) =
+        build_test_kernel(&mut ctx, vec![ptr_ty.into(), ptr_ty.into(), ptr_ty.into()]);
+
+    let acc_ptr = entry.deref(&ctx).get_argument(0);
+    let a_ptr = entry.deref(&ctx).get_argument(1);
+    let b_ptr = entry.deref(&ctx).get_argument(2);
+
+    // MmaM16N8K8F32Tf32Op: 3 pointer operands, 0 results
+    let op = Operation::new(
+        &mut ctx,
+        nvvm::MmaM16N8K8F32Tf32Op::get_concrete_op_info(),
+        vec![],
+        vec![acc_ptr, a_ptr, b_ptr],
+        vec![],
+        0,
+    );
+    op.insert_at_back(entry, &ctx);
+    append_return(&mut ctx, entry);
+
+    assert_inline_asm_lowering(
+        &mut ctx,
+        module_ptr,
+        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+    )
+}
