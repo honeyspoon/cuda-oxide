@@ -64,6 +64,7 @@
 /// // Swap bytes 0 and 1 of a single word:
 /// let swapped = prmt_b32(x, x, 0x0000_3210);
 /// ```
+#[must_use]
 #[inline(never)]
 pub fn prmt_b32(a: u32, b: u32, c: u32) -> u32 {
     let _ = (a, b, c);

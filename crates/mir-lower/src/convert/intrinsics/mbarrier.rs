@@ -441,7 +441,7 @@ pub(crate) fn convert_nanosleep(
     let ns = operands[0];
 
     let asm_template = "nanosleep.u32 $0;";
-    inline_asm_convergent(
+    inline_asm_sideeffect(
         ctx,
         rewriter,
         void_ty.into(),
@@ -469,7 +469,7 @@ pub(crate) fn convert_pending_count(
     let state = operands[0];
 
     let asm_template = "mbarrier.pending_count.b64 $0, $1;";
-    let asm_op = inline_asm_convergent(
+    let asm_op = inline_asm_pure(
         ctx,
         rewriter,
         i32_ty.into(),

@@ -562,6 +562,7 @@ pub unsafe fn mbarrier_inval(bar: *mut Barrier) {
 /// ```ptx
 /// mbarrier.pending_count.b64 count, state;
 /// ```
+#[must_use]
 #[inline(never)]
 pub fn mbarrier_pending_count(state: u64) -> u32 {
     let _ = state;
