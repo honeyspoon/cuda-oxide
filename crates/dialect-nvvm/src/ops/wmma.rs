@@ -77,10 +77,15 @@ impl Verify for MovmatrixTransB16Op {
 #[pliron_op(
     name = "nvvm.mma_m16n8k8_f32_bf16",
     format,
-    verifier = "succ",
     interfaces = [NOpdsInterface<3>, NResultsInterface<0>],
 )]
 pub struct MmaM16N8K8F32Bf16Op;
+
+impl Verify for MmaM16N8K8F32Bf16Op {
+    fn verify(&self, _ctx: &Context) -> Result<(), Error> {
+        Ok(())
+    }
+}
 
 impl MmaM16N8K8F32Bf16Op {
     pub fn new(op: Ptr<Operation>) -> Self {
@@ -94,10 +99,15 @@ impl MmaM16N8K8F32Bf16Op {
 #[pliron_op(
     name = "nvvm.mma_m16n8k4_f32_tf32",
     format,
-    verifier = "succ",
     interfaces = [NOpdsInterface<3>, NResultsInterface<0>],
 )]
 pub struct MmaM16N8K4F32Tf32Op;
+
+impl Verify for MmaM16N8K4F32Tf32Op {
+    fn verify(&self, _ctx: &Context) -> Result<(), Error> {
+        Ok(())
+    }
+}
 
 impl MmaM16N8K4F32Tf32Op {
     pub fn new(op: Ptr<Operation>) -> Self {
