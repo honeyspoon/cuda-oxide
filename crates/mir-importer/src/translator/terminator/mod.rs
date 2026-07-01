@@ -68,9 +68,11 @@ use dialect_mir::ops::{
     MirUnrollHintOp,
 };
 use dialect_nvvm::ops::{
-    ReadPtxSregCtaidXOp, ReadPtxSregCtaidYOp, ReadPtxSregLanemaskEqOp, ReadPtxSregLanemaskGeOp,
-    ReadPtxSregLanemaskGtOp, ReadPtxSregLanemaskLeOp, ReadPtxSregLanemaskLtOp, ReadPtxSregNtidXOp,
-    ReadPtxSregNtidYOp, ReadPtxSregTidXOp, ReadPtxSregTidYOp,
+    ReadPtxSregCtaidXOp, ReadPtxSregCtaidYOp, ReadPtxSregDynamicSmemSizeOp, ReadPtxSregGridIdOp,
+    ReadPtxSregLanemaskEqOp, ReadPtxSregLanemaskGeOp, ReadPtxSregLanemaskGtOp,
+    ReadPtxSregLanemaskLeOp, ReadPtxSregLanemaskLtOp, ReadPtxSregNsmIdOp, ReadPtxSregNtidXOp,
+    ReadPtxSregNtidYOp, ReadPtxSregNwarpIdOp, ReadPtxSregSmIdOp, ReadPtxSregTidXOp,
+    ReadPtxSregTidYOp, ReadPtxSregTotalSmemSizeOp, ReadPtxSregWarpIdOp,
 };
 use pliron::basic_block::BasicBlock;
 use pliron::builtin::op_interfaces::OperandSegmentInterface;
@@ -2491,6 +2493,46 @@ fn try_dispatch_intrinsic(
                 loc,
             )?))
         }
+        // SM and grid identification
+        "cuda_device::smid" | "cuda_device::thread::smid" => {
+            Ok(Some(helpers::emit_nvvm_intrinsic(
+                ctx,
+                ReadPtxSregSmIdOp::get_concrete_op_info(),
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::nsmid" | "cuda_device::thread::nsmid" => {
+            Ok(Some(helpers::emit_nvvm_intrinsic(
+                ctx,
+                ReadPtxSregNsmIdOp::get_concrete_op_info(),
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::gridid" | "cuda_device::thread::gridid" => {
+            Ok(Some(helpers::emit_nvvm_intrinsic_u64(
+                ctx,
+                ReadPtxSregGridIdOp::get_concrete_op_info(),
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
         "cuda_device::grid::envreg1" => Ok(Some(helpers::emit_nvvm_intrinsic(
             ctx,
             dialect_nvvm::ops::ReadPtxSregEnvReg1Op::get_concrete_op_info(),
@@ -2505,6 +2547,29 @@ fn try_dispatch_intrinsic(
         "cuda_device::grid::envreg2" => Ok(Some(helpers::emit_nvvm_intrinsic(
             ctx,
             dialect_nvvm::ops::ReadPtxSregEnvReg2Op::get_concrete_op_info(),
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        // Shared memory size queries
+        "cuda_device::shared::dynamic_smem_size" => Ok(Some(helpers::emit_nvvm_intrinsic(
+            ctx,
+            ReadPtxSregDynamicSmemSizeOp::get_concrete_op_info(),
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::shared::total_smem_size" => Ok(Some(helpers::emit_nvvm_intrinsic(
+            ctx,
+            ReadPtxSregTotalSmemSizeOp::get_concrete_op_info(),
             destination,
             target,
             block_ptr,
@@ -3153,6 +3218,29 @@ fn try_dispatch_intrinsic(
         "cuda_device::warp::lanemask_gt" => Ok(Some(helpers::emit_nvvm_intrinsic(
             ctx,
             ReadPtxSregLanemaskGtOp::get_concrete_op_info(),
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        // Hardware warp identification
+        "cuda_device::warp::warpid" => Ok(Some(helpers::emit_nvvm_intrinsic(
+            ctx,
+            ReadPtxSregWarpIdOp::get_concrete_op_info(),
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::warp::nwarpid" => Ok(Some(helpers::emit_nvvm_intrinsic(
+            ctx,
+            ReadPtxSregNwarpIdOp::get_concrete_op_info(),
             destination,
             target,
             block_ptr,
@@ -3856,8 +3944,108 @@ fn try_dispatch_intrinsic(
                 ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
             )?))
         }
+        // =================================================================
+        // Ldmatrix: warp-cooperative shared memory matrix loads
+        // =================================================================
+        "cuda_device::wmma::ldmatrix_x1" => Ok(Some(intrinsics::ldmatrix::emit_ldmatrix_x1(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::wmma::ldmatrix_x1_trans" => {
+            Ok(Some(intrinsics::ldmatrix::emit_ldmatrix_x1_trans(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::wmma::ldmatrix_x2" => Ok(Some(intrinsics::ldmatrix::emit_ldmatrix_x2(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::wmma::ldmatrix_x2_trans" => {
+            Ok(Some(intrinsics::ldmatrix::emit_ldmatrix_x2_trans(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::wmma::ldmatrix_x4" => Ok(Some(intrinsics::ldmatrix::emit_ldmatrix_x4(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::wmma::ldmatrix_x4_trans" => {
+            Ok(Some(intrinsics::ldmatrix::emit_ldmatrix_x4_trans(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+
         "cuda_device::tcgen05::cvt_f32x2_bf16x2" => {
             Ok(Some(intrinsics::memory::emit_cvt_f32x2_bf16x2(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+
+        // =================================================================
+        // Warp-level matrix operations (from intrinsics::wmma)
+        // =================================================================
+        "cuda_device::wmma::movmatrix_trans_b16" => {
+            Ok(Some(intrinsics::wmma::emit_movmatrix_trans_b16(
                 ctx,
                 body,
                 args,

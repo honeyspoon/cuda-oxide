@@ -231,7 +231,8 @@ compiles a Rust kernel to PTX, launches it on the GPU, and prints
 | `host_closure`       | Generic kernels with closures passed from host                           |
 | `generic`            | Generic kernels with monomorphization (`scale<T>`)                       |
 | `ord_cmp`            | Device-side `Ord::cmp` lowering for signed and unsigned integers         |
-| `gemm_sol`           | GEMM SoL: 868 TFLOPS, 58% cublasLt SoL on B200 (148 SMs); 8 kernels      |
+| `gemm_sol_final`     | Canonical Blackwell GEMM SoL: size-specialized CLC + cg2 + vector stores |
+| `gemm_sol`           | Historical GEMM kernel progression and comparison kernels                |
 | `tcgen05`            | Blackwell tensor cores (sm_100a): TMEM, MMA, cta_group::2                |
 | `atomics`            | GPU atomics: 6 types x 3 scopes x 5 orderings (20 tests)                 |
 | `atomic_f16`         | Scalar f16 atomics: per-scope correctness checks + f32 vs f16 bench      |
@@ -245,7 +246,7 @@ compiles a Rust kernel to PTX, launches it on the GPU, and prints
 
 ```bash
 cargo oxide run vecadd
-cargo oxide run gemm_sol
+cargo oxide run gemm_sol_final
 ```
 
 ## Crate Overview
@@ -302,7 +303,7 @@ cargo oxide run gemm_sol
 - MathDx integration: cuFFTDx thread-level FFT, cuBLASDx block-level GEMM
 - Tile interop (experimental): [`cutile_inter_kernel`](crates/rustc-codegen-cuda/examples/cutile_inter_kernel/README.md) chains a cutile-rs Tile kernel and a cuda-oxide SIMT PTX kernel on the same CUDA stream over shared device tensors. Intra-kernel Tile interop is work in progress and tracked in [#96](https://github.com/NVlabs/cuda-oxide/issues/96).
 - Host runtime: `cuda-core` (explicit control, pinned host transfers) and `cuda-async` (composable async operations)
-- GEMM SoL: 868 TFLOPS (58% of cublasLt FP16 SoL) on B200 (148 SMs) with cta_group::2 + CLC + 4-stage pipeline (see `gemm_sol` example)
+- Canonical Blackwell GEMM SoL example with size-specialized M256xN256/M512xN256 CLC + cta_group::2 kernels and vectorized epilogues (see `gemm_sol_final`)
 
 ## Documentation
 
