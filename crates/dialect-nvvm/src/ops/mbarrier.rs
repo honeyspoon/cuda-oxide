@@ -36,10 +36,16 @@
 
 use pliron::{
     builtin::op_interfaces::{NOpdsInterface, NResultsInterface},
+    builtin::types::IntegerType,
+    common_traits::Verify,
     context::Context,
     context::Ptr,
+    location::Located,
     op::Op,
     operation::Operation,
+    result::Error,
+    r#type::Typed,
+    verify_err,
 };
 use pliron_derive::pliron_op;
 
@@ -500,10 +506,13 @@ impl NanosleepOp {
 /// # Results
 ///
 /// - `count` (i32): pending arrival count
+///
+/// # Verification
+///
+/// - Must have 1 operand and 1 result of type `i32`
 #[pliron_op(
     name = "nvvm.mbarrier_pending_count",
     format,
-    verifier = "succ",
     interfaces = [NOpdsInterface<1>, NResultsInterface<1>],
 )]
 pub struct MbarrierPendingCountOp;
@@ -512,6 +521,33 @@ impl MbarrierPendingCountOp {
     /// Wrap an existing operation pointer.
     pub fn new(op: Ptr<Operation>) -> Self {
         MbarrierPendingCountOp { op }
+    }
+}
+
+impl Verify for MbarrierPendingCountOp {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        let op = &*self.get_operation().deref(ctx);
+        let res = op.get_result(0);
+        let ty = res.get_type(ctx);
+
+        let ty_obj = ty.deref(ctx);
+        let int_ty = match ty_obj.downcast_ref::<IntegerType>() {
+            Some(ty) => ty,
+            None => {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mbarrier_pending_count result must be integer"
+                );
+            }
+        };
+
+        if int_ty.width() != 32 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.mbarrier_pending_count result must be 32-bit integer"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -533,7 +569,6 @@ impl MbarrierPendingCountOp {
 #[pliron_op(
     name = "nvvm.mbarrier_arrive_drop_shared",
     format,
-    verifier = "succ",
     interfaces = [NOpdsInterface<1>, NResultsInterface<0>],
 )]
 pub struct MbarrierArriveDropSharedOp;
@@ -542,6 +577,13 @@ impl MbarrierArriveDropSharedOp {
     /// Wrap an existing operation pointer.
     pub fn new(op: Ptr<Operation>) -> Self {
         MbarrierArriveDropSharedOp { op }
+    }
+}
+
+impl Verify for MbarrierArriveDropSharedOp {
+    fn verify(&self, _ctx: &Context) -> Result<(), Error> {
+        // Operand/result count enforced by NOpdsInterface<1> and NResultsInterface<0>.
+        Ok(())
     }
 }
 
