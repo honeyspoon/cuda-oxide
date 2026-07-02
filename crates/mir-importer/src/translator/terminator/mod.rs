@@ -4197,6 +4197,82 @@ fn try_dispatch_intrinsic(
             block_map,
             loc,
         )?)),
+        "cuda_device::dotprod::dp2a_hi_s32" => Ok(Some(intrinsics::dotprod::emit_dp2a_hi_s32(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::dotprod::dp2a_hi_u32" => Ok(Some(intrinsics::dotprod::emit_dp2a_hi_u32(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::dotprod::dp4a_s32_u32" => Ok(Some(intrinsics::dotprod::emit_dp4a_s32_u32(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::dotprod::dp4a_u32_s32" => Ok(Some(intrinsics::dotprod::emit_dp4a_u32_s32(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+        "cuda_device::dotprod::dp2a_lo_s32_u32" => {
+            Ok(Some(intrinsics::dotprod::emit_dp2a_lo_s32_u32(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::dotprod::dp2a_lo_u32_s32" => {
+            Ok(Some(intrinsics::dotprod::emit_dp2a_lo_u32_s32(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
         // =================================================================
         // bf16x2 packed arithmetic (from intrinsics::bf16x2)
         // =================================================================

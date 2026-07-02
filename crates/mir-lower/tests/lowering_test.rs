@@ -2397,6 +2397,168 @@ fn test_dp2a_u32_lowers_to_inline_asm() -> Result<(), anyhow::Error> {
     assert_inline_asm_lowering(&mut ctx, module_ptr, "dp2a.lo.u32.u32")
 }
 
+#[test]
+fn test_dp2a_hi_s32_lowers_to_inline_asm() -> Result<(), anyhow::Error> {
+    use pliron::builtin::types::{IntegerType, Signedness};
+
+    let mut ctx = make_test_ctx();
+    let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signless);
+    let (module_ptr, entry) =
+        build_test_kernel(&mut ctx, vec![i32_ty.into(), i32_ty.into(), i32_ty.into()]);
+
+    let a_val = entry.deref(&ctx).get_argument(0);
+    let b_val = entry.deref(&ctx).get_argument(1);
+    let c_val = entry.deref(&ctx).get_argument(2);
+
+    let op = Operation::new(
+        &mut ctx,
+        nvvm::Dp2aHiS32Op::get_concrete_op_info(),
+        vec![i32_ty.into()],
+        vec![a_val, b_val, c_val],
+        vec![],
+        0,
+    );
+    op.insert_at_back(entry, &ctx);
+    append_return(&mut ctx, entry);
+
+    assert_inline_asm_lowering(&mut ctx, module_ptr, "dp2a.hi.s32.s32")
+}
+
+#[test]
+fn test_dp2a_hi_u32_lowers_to_inline_asm() -> Result<(), anyhow::Error> {
+    use pliron::builtin::types::{IntegerType, Signedness};
+
+    let mut ctx = make_test_ctx();
+    let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signless);
+    let (module_ptr, entry) =
+        build_test_kernel(&mut ctx, vec![i32_ty.into(), i32_ty.into(), i32_ty.into()]);
+
+    let a_val = entry.deref(&ctx).get_argument(0);
+    let b_val = entry.deref(&ctx).get_argument(1);
+    let c_val = entry.deref(&ctx).get_argument(2);
+
+    let op = Operation::new(
+        &mut ctx,
+        nvvm::Dp2aHiU32Op::get_concrete_op_info(),
+        vec![i32_ty.into()],
+        vec![a_val, b_val, c_val],
+        vec![],
+        0,
+    );
+    op.insert_at_back(entry, &ctx);
+    append_return(&mut ctx, entry);
+
+    assert_inline_asm_lowering(&mut ctx, module_ptr, "dp2a.hi.u32.u32")
+}
+
+#[test]
+fn test_dp4a_s32_u32_lowers_to_inline_asm() -> Result<(), anyhow::Error> {
+    use pliron::builtin::types::{IntegerType, Signedness};
+
+    let mut ctx = make_test_ctx();
+    let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signless);
+    let (module_ptr, entry) =
+        build_test_kernel(&mut ctx, vec![i32_ty.into(), i32_ty.into(), i32_ty.into()]);
+
+    let a_val = entry.deref(&ctx).get_argument(0);
+    let b_val = entry.deref(&ctx).get_argument(1);
+    let c_val = entry.deref(&ctx).get_argument(2);
+
+    let op = Operation::new(
+        &mut ctx,
+        nvvm::Dp4aS32U32Op::get_concrete_op_info(),
+        vec![i32_ty.into()],
+        vec![a_val, b_val, c_val],
+        vec![],
+        0,
+    );
+    op.insert_at_back(entry, &ctx);
+    append_return(&mut ctx, entry);
+
+    assert_inline_asm_lowering(&mut ctx, module_ptr, "dp4a.s32.u32")
+}
+
+#[test]
+fn test_dp4a_u32_s32_lowers_to_inline_asm() -> Result<(), anyhow::Error> {
+    use pliron::builtin::types::{IntegerType, Signedness};
+
+    let mut ctx = make_test_ctx();
+    let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signless);
+    let (module_ptr, entry) =
+        build_test_kernel(&mut ctx, vec![i32_ty.into(), i32_ty.into(), i32_ty.into()]);
+
+    let a_val = entry.deref(&ctx).get_argument(0);
+    let b_val = entry.deref(&ctx).get_argument(1);
+    let c_val = entry.deref(&ctx).get_argument(2);
+
+    let op = Operation::new(
+        &mut ctx,
+        nvvm::Dp4aU32S32Op::get_concrete_op_info(),
+        vec![i32_ty.into()],
+        vec![a_val, b_val, c_val],
+        vec![],
+        0,
+    );
+    op.insert_at_back(entry, &ctx);
+    append_return(&mut ctx, entry);
+
+    assert_inline_asm_lowering(&mut ctx, module_ptr, "dp4a.u32.s32")
+}
+
+#[test]
+fn test_dp2a_lo_s32_u32_lowers_to_inline_asm() -> Result<(), anyhow::Error> {
+    use pliron::builtin::types::{IntegerType, Signedness};
+
+    let mut ctx = make_test_ctx();
+    let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signless);
+    let (module_ptr, entry) =
+        build_test_kernel(&mut ctx, vec![i32_ty.into(), i32_ty.into(), i32_ty.into()]);
+
+    let a_val = entry.deref(&ctx).get_argument(0);
+    let b_val = entry.deref(&ctx).get_argument(1);
+    let c_val = entry.deref(&ctx).get_argument(2);
+
+    let op = Operation::new(
+        &mut ctx,
+        nvvm::Dp2aLoS32U32Op::get_concrete_op_info(),
+        vec![i32_ty.into()],
+        vec![a_val, b_val, c_val],
+        vec![],
+        0,
+    );
+    op.insert_at_back(entry, &ctx);
+    append_return(&mut ctx, entry);
+
+    assert_inline_asm_lowering(&mut ctx, module_ptr, "dp2a.lo.s32.u32")
+}
+
+#[test]
+fn test_dp2a_lo_u32_s32_lowers_to_inline_asm() -> Result<(), anyhow::Error> {
+    use pliron::builtin::types::{IntegerType, Signedness};
+
+    let mut ctx = make_test_ctx();
+    let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signless);
+    let (module_ptr, entry) =
+        build_test_kernel(&mut ctx, vec![i32_ty.into(), i32_ty.into(), i32_ty.into()]);
+
+    let a_val = entry.deref(&ctx).get_argument(0);
+    let b_val = entry.deref(&ctx).get_argument(1);
+    let c_val = entry.deref(&ctx).get_argument(2);
+
+    let op = Operation::new(
+        &mut ctx,
+        nvvm::Dp2aLoU32S32Op::get_concrete_op_info(),
+        vec![i32_ty.into()],
+        vec![a_val, b_val, c_val],
+        vec![],
+        0,
+    );
+    op.insert_at_back(entry, &ctx);
+    append_return(&mut ctx, entry);
+
+    assert_inline_asm_lowering(&mut ctx, module_ptr, "dp2a.lo.u32.s32")
+}
+
 // =============================================================================
 // cp.async lowering tests
 // =============================================================================

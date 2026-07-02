@@ -91,3 +91,107 @@ pub fn dp2a_u32(a: u32, b: u32, c: u32) -> u32 {
     let _ = (a, b, c);
     unreachable!("dp2a_u32 called outside CUDA kernel context")
 }
+
+/// 2-element signed half-word × byte dot product with accumulation (upper half).
+///
+/// Interprets `a` as 2 packed **signed** 16-bit values and `b`'s upper 2
+/// bytes as signed values. Computes `d = c + a.half0*b.byte2 + a.half1*b.byte3`.
+///
+/// # PTX
+///
+/// ```ptx
+/// dp2a.hi.s32.s32 %d, %a, %b, %c;
+/// ```
+#[inline(never)]
+#[must_use]
+pub fn dp2a_hi_s32(a: i32, b: u32, c: i32) -> i32 {
+    let _ = (a, b, c);
+    unreachable!("dp2a_hi_s32 called outside CUDA kernel context")
+}
+
+/// 2-element unsigned half-word × byte dot product with accumulation (upper half).
+///
+/// Interprets `a` as 2 packed **unsigned** 16-bit values and `b`'s upper 2
+/// bytes as unsigned values. Computes `d = c + a.half0*b.byte2 + a.half1*b.byte3`.
+///
+/// # PTX
+///
+/// ```ptx
+/// dp2a.hi.u32.u32 %d, %a, %b, %c;
+/// ```
+#[inline(never)]
+#[must_use]
+pub fn dp2a_hi_u32(a: u32, b: u32, c: u32) -> u32 {
+    let _ = (a, b, c);
+    unreachable!("dp2a_hi_u32 called outside CUDA kernel context")
+}
+
+/// Mixed-signedness 4-element byte dot product with accumulation.
+///
+/// Interprets `a` as 4 packed **signed** bytes and `b` as 4 packed
+/// **unsigned** bytes, computes the dot product, and adds the signed 32-bit
+/// accumulator `c`.
+///
+/// # PTX
+///
+/// ```ptx
+/// dp4a.s32.u32 %d, %a, %b, %c;
+/// ```
+#[inline(never)]
+#[must_use]
+pub fn dp4a_s32_u32(a: i32, b: u32, c: i32) -> i32 {
+    let _ = (a, b, c);
+    unreachable!("dp4a_s32_u32 called outside CUDA kernel context")
+}
+
+/// Mixed-signedness 4-element byte dot product with accumulation.
+///
+/// Interprets `a` as 4 packed **unsigned** bytes and `b` as 4 packed
+/// **signed** bytes, computes the dot product, and adds the unsigned 32-bit
+/// accumulator `c`.
+///
+/// # PTX
+///
+/// ```ptx
+/// dp4a.u32.s32 %d, %a, %b, %c;
+/// ```
+#[inline(never)]
+#[must_use]
+pub fn dp4a_u32_s32(a: u32, b: i32, c: u32) -> u32 {
+    let _ = (a, b, c);
+    unreachable!("dp4a_u32_s32 called outside CUDA kernel context")
+}
+
+/// Mixed-signedness 2-element half-word × byte dot product with accumulation (lower half).
+///
+/// Interprets `a` as 2 packed **signed** 16-bit values and `b`'s lower 2
+/// bytes as **unsigned** values. Computes `d = c + a.half0*b.byte0 + a.half1*b.byte1`.
+///
+/// # PTX
+///
+/// ```ptx
+/// dp2a.lo.s32.u32 %d, %a, %b, %c;
+/// ```
+#[inline(never)]
+#[must_use]
+pub fn dp2a_lo_s32_u32(a: i32, b: u32, c: i32) -> i32 {
+    let _ = (a, b, c);
+    unreachable!("dp2a_lo_s32_u32 called outside CUDA kernel context")
+}
+
+/// Mixed-signedness 2-element half-word × byte dot product with accumulation (lower half).
+///
+/// Interprets `a` as 2 packed **unsigned** 16-bit values and `b`'s lower 2
+/// bytes as **signed** values. Computes `d = c + a.half0*b.byte0 + a.half1*b.byte1`.
+///
+/// # PTX
+///
+/// ```ptx
+/// dp2a.lo.u32.s32 %d, %a, %b, %c;
+/// ```
+#[inline(never)]
+#[must_use]
+pub fn dp2a_lo_u32_s32(a: u32, b: i32, c: u32) -> u32 {
+    let _ = (a, b, c);
+    unreachable!("dp2a_lo_u32_s32 called outside CUDA kernel context")
+}
