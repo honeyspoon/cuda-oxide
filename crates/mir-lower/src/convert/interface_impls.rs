@@ -49,8 +49,8 @@ use dialect_nvvm::ops::{
     CpAsyncBulkTensorS2gTile3dOp, CpAsyncBulkTensorS2gTile4dOp, CpAsyncBulkTensorS2gTile5dOp,
     CpAsyncBulkWaitGroupOp, CpAsyncBulkWaitGroupReadOp, CpAsyncCa4Op, CpAsyncCa8Op,
     CpAsyncCaZfill4Op, CpAsyncCaZfill8Op, CpAsyncCaZfill16Op, CvtF16x2F32Op, CvtF32x2Bf16x2Op,
-    CvtRnReluBf16x2F32Op, CvtRnReluF16x2F32Op, CvtRzBf16x2F32Op, CvtRzF16x2F32Op, Dp2aS32Op,
-    Dp2aU32Op, Dp4aS32Op, Dp4aU32Op, DsmemReadU32Op, ElectSyncOp,
+    CvtRnBf16x2F32Op, CvtRnReluBf16x2F32Op, CvtRnReluF16x2F32Op, CvtRzBf16x2F32Op, CvtRzF16x2F32Op,
+    Dp2aS32Op, Dp2aU32Op, Dp4aS32Op, Dp4aU32Op, DsmemReadU32Op, ElectSyncOp,
     FenceMbarrierInitReleaseClusterOp, FenceProxyAsyncGenericAcquireSharedClusterClusterOp,
     FenceProxyAsyncGenericReleaseSharedCtaClusterOp, FenceProxyAsyncSharedCtaOp, FmaBf16x2Op,
     FmaReluBf16x2Op, InlinePtxOp, LdmatrixX1Op, LdmatrixX1TransOp, LdmatrixX2Op, LdmatrixX2TransOp,
@@ -2855,6 +2855,23 @@ impl MirToLlvmConversion for CvtRnReluF16x2F32Op {
         operands_info: &OperandsInfo,
     ) -> Result<()> {
         super::intrinsics::convert::convert_cvt_rn_relu_f16x2_f32(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for CvtRnBf16x2F32Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::convert::convert_cvt_rn_bf16x2_f32(
             ctx,
             rewriter,
             self.get_operation(),

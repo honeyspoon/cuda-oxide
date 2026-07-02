@@ -111,3 +111,26 @@ pub fn cvt_rz_bf16x2_f32(lo: f32, hi: f32) -> u32 {
     let _ = (lo, hi);
     unreachable!("cvt_rz_bf16x2_f32 called outside CUDA kernel context")
 }
+
+/// Convert two f32 values to a packed bf16x2 (u32) using round-to-nearest-even.
+///
+/// Maps to PTX: `cvt.rn.bf16x2.f32 d, hi, lo;`
+///
+/// This is the bf16 counterpart of [`cvt_f16x2_f32`].  It is also
+/// available via [`crate::tcgen05::cvt_f32x2_bf16x2`] (which uses
+/// `a`/`b` argument naming), but this standalone version lives in the
+/// `convert` module so it can be used without pulling in tcgen05
+/// dependencies.
+///
+/// # Arguments
+/// - `lo`: f32 value for the low 16 bits (bits `[15:0]`)
+/// - `hi`: f32 value for the high 16 bits (bits `[31:16]`)
+///
+/// # Returns
+/// A u32 containing two packed bf16 values.
+#[inline(never)]
+#[must_use]
+pub fn cvt_rn_bf16x2_f32(lo: f32, hi: f32) -> u32 {
+    let _ = (lo, hi);
+    unreachable!("cvt_rn_bf16x2_f32 called outside CUDA kernel context")
+}
