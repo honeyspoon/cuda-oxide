@@ -443,3 +443,142 @@ pub unsafe fn mma_m16n8k32_s32_s8(c: [i32; 4], a: [u32; 4], b: [u32; 2]) -> [i32
     let _ = (c, a, b);
     unreachable!("mma_m16n8k32_s32_s8 called outside CUDA kernel context")
 }
+
+/// Multiply one warp-distributed BF16 tile (m16n8k8) and add an f32 accumulator.
+///
+/// Together, the 32 lanes compute `D = A × B + C` for row-major `A` with
+/// shape 16×8, column-major `B` with shape 8×8, and `C`/`D` with shape
+/// 16×8. Each lane supplies its fragments in registers and receives four f32
+/// result registers. The call itself does not access memory or act as a fence.
+///
+/// `a[j / 2]` packs logical BF16 elements in low-to-high 16-bit order.
+/// `b` packs two BF16 elements in one u32 register.
+///
+/// # PTX
+///
+/// ```ptx
+/// mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32
+///     {%d0, %d1, %d2, %d3},
+///     {%a0, %a1},
+///     {%b0},
+///     {%c0, %c1, %c2, %c3};
+/// ```
+///
+/// # Safety
+///
+/// - All 32 lanes must execute the same call with the same qualifiers.
+/// - Calling from divergent control flow is undefined behavior.
+/// - Requires `sm_80+` and PTX ISA 7.0+. cuda-oxide selects both floors
+///   automatically.
+#[inline(never)]
+#[must_use]
+pub unsafe fn mma_m16n8k8_f32_bf16(c: [f32; 4], a: [u32; 2], b: u32) -> [f32; 4] {
+    let _ = (c, a, b);
+    unreachable!("mma_m16n8k8_f32_bf16 called outside CUDA kernel context")
+}
+
+/// Multiply one warp-distributed TF32 tile (m16n8k4) and add an f32 accumulator.
+///
+/// Together, the 32 lanes compute `D = A × B + C` for row-major `A` with
+/// shape 16×4 (TensorFloat-32), column-major `B` with shape 4×8
+/// (TensorFloat-32), and `C`/`D` with shape 16×8 (f32). Each lane supplies
+/// its fragments in registers and receives four f32 result registers.
+///
+/// TF32 values occupy 32 bits each but only use 19 bits of precision
+/// (1 sign + 8 exponent + 10 mantissa). They are passed as `u32` registers.
+///
+/// # PTX
+///
+/// ```ptx
+/// mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32
+///     {%d0, %d1, %d2, %d3},
+///     {%a0, %a1},
+///     {%b0},
+///     {%c0, %c1, %c2, %c3};
+/// ```
+///
+/// # Safety
+///
+/// - All 32 lanes must execute the same call with the same qualifiers.
+/// - Calling from divergent control flow is undefined behavior.
+/// - Requires `sm_80+` and PTX ISA 7.0+. cuda-oxide selects both floors
+///   automatically.
+#[inline(never)]
+#[must_use]
+pub unsafe fn mma_m16n8k4_f32_tf32(c: [f32; 4], a: [u32; 2], b: u32) -> [f32; 4] {
+    let _ = (c, a, b);
+    unreachable!("mma_m16n8k4_f32_tf32 called outside CUDA kernel context")
+}
+
+/// Warp MMA: D = A x B + C (m16n8k4, f64 output, f64 inputs).
+///
+/// Performs a 16×8×4 double-precision matrix multiplication using tensor cores.
+/// All 32 threads in the warp participate.
+///
+/// # Matrix Dimensions
+///
+/// - **A**: 16×4 (row-major, f64), distributed as 2 × f64 per thread
+/// - **B**: 4×8 (col-major, f64), distributed as 1 × f64 per thread
+/// - **D/C**: 16×8 (f64 accumulator), distributed as 4 × f64 per thread
+///
+/// The multiply-add uses round-to-nearest-even (`.rn`) rounding.
+///
+/// # PTX
+///
+/// ```ptx
+/// mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64
+///     {%d0, %d1, %d2, %d3},
+///     {%a0, %a1},
+///     {%b0},
+///     {%c0, %c1, %c2, %c3};
+/// ```
+///
+/// # Safety
+///
+/// - All 32 lanes in the warp must execute the same call together.
+/// - Calling from divergent control flow is undefined behavior.
+/// - No participating lane may have exited before the call.
+/// - Requires `sm_80+` and PTX ISA 7.0+. cuda-oxide selects both floors
+///   automatically.
+#[inline(never)]
+#[must_use]
+pub unsafe fn mma_m16n8k4_f64(c: [f64; 4], a: [f64; 2], b: f64) -> [f64; 4] {
+    let _ = (c, a, b);
+    unreachable!("mma_m16n8k4_f64 called outside CUDA kernel context")
+}
+
+/// Multiply one warp-distributed F16 tile (m16n8k16) with f16 accumulator.
+///
+/// Together, the 32 lanes compute `D = A × B + C` where all matrices use
+/// half-precision (f16) format. The values are packed as f16x2 pairs into
+/// u32 registers.
+///
+/// # Matrix Dimensions
+///
+/// - **A**: 16×16 (row-major, f16), distributed as 4 × u32 (packed f16x2) per thread
+/// - **B**: 16×8 (col-major, f16), distributed as 2 × u32 (packed f16x2) per thread
+/// - **D/C**: 16×8 (f16 accumulator), distributed as 2 × u32 (packed f16x2) per thread
+///
+/// # PTX
+///
+/// ```ptx
+/// mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16
+///     {%d0, %d1},
+///     {%a0, %a1, %a2, %a3},
+///     {%b0, %b1},
+///     {%c0, %c1};
+/// ```
+///
+/// # Safety
+///
+/// - All 32 lanes must execute the same call with the same qualifiers.
+/// - Calling from divergent control flow is undefined behavior.
+/// - Requires `sm_80+` and PTX ISA 7.0+. cuda-oxide selects both floors
+///   automatically.
+#[inline(never)]
+#[must_use]
+pub unsafe fn mma_m16n8k16_f16_f16(c: [u32; 2], a: [u32; 4], b: [u32; 2]) -> [u32; 2] {
+    let _ = (c, a, b);
+    unreachable!("mma_m16n8k16_f16_f16 called outside CUDA kernel context")
+}
+
