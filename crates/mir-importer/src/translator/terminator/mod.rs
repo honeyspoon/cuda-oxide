@@ -3685,6 +3685,105 @@ fn try_dispatch_intrinsic(
             loc,
         )?)),
 
+        // Integer MMA variants (Ampere+)
+        "cuda_device::wmma::mma_m16n8k32_s32_u8" => {
+            Ok(Some(intrinsics::wmma::emit_mma_m16n8k32_s32_u8(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::wmma::mma_m16n8k16_s32_s8" => {
+            Ok(Some(intrinsics::wmma::emit_mma_m16n8k16_s32_s8(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::wmma::mma_m16n8k16_s32_u8" => {
+            Ok(Some(intrinsics::wmma::emit_mma_m16n8k16_s32_u8(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::wmma::mma_m16n8k64_s32_s4" => {
+            Ok(Some(intrinsics::wmma::emit_mma_m16n8k64_s32_s4(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::wmma::mma_m16n8k64_s32_u4" => {
+            Ok(Some(intrinsics::wmma::emit_mma_m16n8k64_s32_u4(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::wmma::mma_m16n8k256_s32_b1_and" => {
+            Ok(Some(intrinsics::wmma::emit_mma_m16n8k256_s32_b1_and(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::wmma::mma_m16n8k256_s32_b1_xor" => {
+            Ok(Some(intrinsics::wmma::emit_mma_m16n8k256_s32_b1_xor(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
         // =================================================================
         // WGMMA (from intrinsics::wgmma)
         // =================================================================

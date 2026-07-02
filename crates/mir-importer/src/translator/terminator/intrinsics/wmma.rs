@@ -14,7 +14,11 @@ use dialect_mir::{
     ops::{MirConstructArrayOp, MirExtractFieldOp},
     types::MirArrayType,
 };
-use dialect_nvvm::ops::{MmaM8N8K4F64Op, MmaM16N8K16F32Bf16Op, MovmatrixTransB16Op};
+use dialect_nvvm::ops::{
+    MmaM8N8K4F64Op, MmaM16N8K16F32Bf16Op, MmaM16N8K16S32S8Op, MmaM16N8K16S32U8Op,
+    MmaM16N8K32S32U8Op, MmaM16N8K64S32S4Op, MmaM16N8K64S32U4Op, MmaM16N8K256S32B1AndOp,
+    MmaM16N8K256S32B1XorOp, MovmatrixTransB16Op,
+};
 use pliron::basic_block::BasicBlock;
 use pliron::builtin::types::{FP32Type, FP64Type, IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
@@ -521,4 +525,605 @@ mod tests {
             .is_err()
         );
     }
+}
+
+// =============================================================================
+// Integer MMA: shared helpers
+// =============================================================================
+
+/// Prepare operands for a 10-operand integer MMA (C=[i32;4], A=[u32;4], B=[u32;2]).
+///
+/// Returns the flattened operand vector [C0..C3, A0..A3, B0..B1] and the
+/// last inserted operation.
+#[allow(clippy::too_many_arguments)]
+fn prepare_int_mma_10op(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    loc: Location,
+    intrinsic_name: &str,
+) -> TranslationResult<(Vec<Value>, Ptr<Operation>)> {
+    if args.len() != 3 {
+        return input_err!(
+            loc.clone(),
+            TranslationErr::unsupported(format!(
+                "{intrinsic_name} expects 3 arguments (acc, a, b), got {}",
+                args.len()
+            ))
+        );
+    }
+
+    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signed);
+    let u32_ty = IntegerType::get(ctx, 32, Signedness::Unsigned);
+
+    // C accumulator: [i32; 4]
+    let (c_array, last_op) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[0],
+        value_map,
+        block_ptr,
+        prev_op,
+        loc.clone(),
+    )?;
+    let (c_registers, last_op) = extract_array_registers(
+        ctx,
+        c_array,
+        i32_ty.into(),
+        4,
+        block_ptr,
+        last_op,
+        loc.clone(),
+        "C",
+    )?;
+
+    // A fragment: [u32; 4]
+    let (a_array, last_op_after) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[1],
+        value_map,
+        block_ptr,
+        Some(last_op),
+        loc.clone(),
+    )?;
+    let (a_registers, last_op) = extract_array_registers(
+        ctx,
+        a_array,
+        u32_ty.into(),
+        4,
+        block_ptr,
+        last_op_after,
+        loc.clone(),
+        "A",
+    )?;
+
+    // B fragment: [u32; 2]
+    let (b_array, last_op_after) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[2],
+        value_map,
+        block_ptr,
+        Some(last_op),
+        loc.clone(),
+    )?;
+    let (b_registers, last_op) = extract_array_registers(
+        ctx,
+        b_array,
+        u32_ty.into(),
+        2,
+        block_ptr,
+        last_op_after,
+        loc.clone(),
+        "B",
+    )?;
+
+    let mut operands = c_registers;
+    operands.extend(a_registers);
+    operands.extend(b_registers);
+
+    Ok((operands, last_op))
+}
+
+/// Finish emitting a 4-result i32 MMA: construct the result array and goto.
+#[allow(clippy::too_many_arguments)]
+fn finish_int_mma(
+    ctx: &mut Context,
+    mma_op: Ptr<Operation>,
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+    intrinsic_name: &str,
+) -> TranslationResult<Ptr<Operation>> {
+    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signed);
+    let d_registers = (0..4)
+        .map(|index| mma_op.deref(ctx).get_result(index))
+        .collect();
+    let array_ty = MirArrayType::get(ctx, i32_ty.into(), 4);
+    let d_array = Operation::new(
+        ctx,
+        MirConstructArrayOp::get_concrete_op_info(),
+        vec![array_ty.into()],
+        d_registers,
+        vec![],
+        0,
+    );
+    d_array.deref_mut(ctx).set_loc(loc.clone());
+    d_array.insert_after(ctx, mma_op);
+    let result = d_array.deref(ctx).get_result(0);
+
+    emit_store_result_and_goto(
+        ctx,
+        destination,
+        result,
+        target,
+        block_ptr,
+        d_array,
+        value_map,
+        block_map,
+        loc,
+        &format!("{intrinsic_name} call without target block"),
+    )
+}
+
+// =============================================================================
+// Integer MMA: 10-operand emit functions
+// =============================================================================
+
+/// Emit `mma_m16n8k32_s32_u8`: Warp MMA with s32 accumulator and u8 inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_mma_m16n8k32_s32_u8(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signed);
+    let (operands, last_op) = prepare_int_mma_10op(
+        ctx,
+        body,
+        args,
+        block_ptr,
+        prev_op,
+        value_map,
+        loc.clone(),
+        "mma_m16n8k32_s32_u8",
+    )?;
+    let mma_op = Operation::new(
+        ctx,
+        MmaM16N8K32S32U8Op::get_concrete_op_info(),
+        vec![i32_ty.into(); 4],
+        operands,
+        vec![],
+        0,
+    );
+    mma_op.deref_mut(ctx).set_loc(loc.clone());
+    mma_op.insert_after(ctx, last_op);
+    finish_int_mma(
+        ctx,
+        mma_op,
+        destination,
+        target,
+        block_ptr,
+        value_map,
+        block_map,
+        loc,
+        "mma_m16n8k32_s32_u8",
+    )
+}
+
+/// Emit `mma_m16n8k64_s32_s4`: Warp MMA with s32 accumulator and s4 inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_mma_m16n8k64_s32_s4(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signed);
+    let (operands, last_op) = prepare_int_mma_10op(
+        ctx,
+        body,
+        args,
+        block_ptr,
+        prev_op,
+        value_map,
+        loc.clone(),
+        "mma_m16n8k64_s32_s4",
+    )?;
+    let mma_op = Operation::new(
+        ctx,
+        MmaM16N8K64S32S4Op::get_concrete_op_info(),
+        vec![i32_ty.into(); 4],
+        operands,
+        vec![],
+        0,
+    );
+    mma_op.deref_mut(ctx).set_loc(loc.clone());
+    mma_op.insert_after(ctx, last_op);
+    finish_int_mma(
+        ctx,
+        mma_op,
+        destination,
+        target,
+        block_ptr,
+        value_map,
+        block_map,
+        loc,
+        "mma_m16n8k64_s32_s4",
+    )
+}
+
+/// Emit `mma_m16n8k64_s32_u4`: Warp MMA with s32 accumulator and u4 inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_mma_m16n8k64_s32_u4(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signed);
+    let (operands, last_op) = prepare_int_mma_10op(
+        ctx,
+        body,
+        args,
+        block_ptr,
+        prev_op,
+        value_map,
+        loc.clone(),
+        "mma_m16n8k64_s32_u4",
+    )?;
+    let mma_op = Operation::new(
+        ctx,
+        MmaM16N8K64S32U4Op::get_concrete_op_info(),
+        vec![i32_ty.into(); 4],
+        operands,
+        vec![],
+        0,
+    );
+    mma_op.deref_mut(ctx).set_loc(loc.clone());
+    mma_op.insert_after(ctx, last_op);
+    finish_int_mma(
+        ctx,
+        mma_op,
+        destination,
+        target,
+        block_ptr,
+        value_map,
+        block_map,
+        loc,
+        "mma_m16n8k64_s32_u4",
+    )
+}
+
+/// Emit `mma_m16n8k256_s32_b1_and`: Warp MMA with AND.POPC on b1 inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_mma_m16n8k256_s32_b1_and(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signed);
+    let (operands, last_op) = prepare_int_mma_10op(
+        ctx,
+        body,
+        args,
+        block_ptr,
+        prev_op,
+        value_map,
+        loc.clone(),
+        "mma_m16n8k256_s32_b1_and",
+    )?;
+    let mma_op = Operation::new(
+        ctx,
+        MmaM16N8K256S32B1AndOp::get_concrete_op_info(),
+        vec![i32_ty.into(); 4],
+        operands,
+        vec![],
+        0,
+    );
+    mma_op.deref_mut(ctx).set_loc(loc.clone());
+    mma_op.insert_after(ctx, last_op);
+    finish_int_mma(
+        ctx,
+        mma_op,
+        destination,
+        target,
+        block_ptr,
+        value_map,
+        block_map,
+        loc,
+        "mma_m16n8k256_s32_b1_and",
+    )
+}
+
+/// Emit `mma_m16n8k256_s32_b1_xor`: Warp MMA with XOR.POPC on b1 inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_mma_m16n8k256_s32_b1_xor(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signed);
+    let (operands, last_op) = prepare_int_mma_10op(
+        ctx,
+        body,
+        args,
+        block_ptr,
+        prev_op,
+        value_map,
+        loc.clone(),
+        "mma_m16n8k256_s32_b1_xor",
+    )?;
+    let mma_op = Operation::new(
+        ctx,
+        MmaM16N8K256S32B1XorOp::get_concrete_op_info(),
+        vec![i32_ty.into(); 4],
+        operands,
+        vec![],
+        0,
+    );
+    mma_op.deref_mut(ctx).set_loc(loc.clone());
+    mma_op.insert_after(ctx, last_op);
+    finish_int_mma(
+        ctx,
+        mma_op,
+        destination,
+        target,
+        block_ptr,
+        value_map,
+        block_map,
+        loc,
+        "mma_m16n8k256_s32_b1_xor",
+    )
+}
+
+// =============================================================================
+// Integer MMA: 7-operand variants (C=[i32;4], A=[u32;2], B=u32)
+// =============================================================================
+
+/// Prepare operands for a 7-operand integer MMA (C=[i32;4], A=[u32;2], B=u32).
+///
+/// Returns the flattened operand vector [C0..C3, A0..A1, B] and the
+/// last inserted operation.
+#[allow(clippy::too_many_arguments)]
+fn prepare_int_mma_7op(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    loc: Location,
+    intrinsic_name: &str,
+) -> TranslationResult<(Vec<Value>, Option<Ptr<Operation>>)> {
+    if args.len() != 3 {
+        return input_err!(
+            loc.clone(),
+            TranslationErr::unsupported(format!(
+                "{intrinsic_name} expects 3 arguments (acc, a, b), got {}",
+                args.len()
+            ))
+        );
+    }
+
+    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signed);
+    let u32_ty = IntegerType::get(ctx, 32, Signedness::Unsigned);
+
+    // C accumulator: [i32; 4]
+    let (c_array, last_op) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[0],
+        value_map,
+        block_ptr,
+        prev_op,
+        loc.clone(),
+    )?;
+    let (c_registers, last_op) = extract_array_registers(
+        ctx,
+        c_array,
+        i32_ty.into(),
+        4,
+        block_ptr,
+        last_op,
+        loc.clone(),
+        "C",
+    )?;
+
+    // A fragment: [u32; 2]
+    let (a_array, last_op_after) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[1],
+        value_map,
+        block_ptr,
+        Some(last_op),
+        loc.clone(),
+    )?;
+    let (a_registers, last_op) = extract_array_registers(
+        ctx,
+        a_array,
+        u32_ty.into(),
+        2,
+        block_ptr,
+        last_op_after,
+        loc.clone(),
+        "A",
+    )?;
+
+    // B fragment: scalar u32
+    let (b_val, last_op_after) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[2],
+        value_map,
+        block_ptr,
+        Some(last_op),
+        loc.clone(),
+    )?;
+
+    // Verify B is a u32 scalar
+    {
+        let ty = b_val.get_type(ctx);
+        let ty_ref = ty.deref(ctx);
+        let valid = ty_ref
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|int_ty| int_ty.width() == 32);
+        if !valid {
+            return input_err!(
+                loc,
+                TranslationErr::unsupported(format!("{intrinsic_name} B fragment must be u32"))
+            );
+        }
+    }
+
+    let mut operands = c_registers;
+    operands.extend(a_registers);
+    operands.push(b_val);
+
+    Ok((operands, last_op_after))
+}
+
+/// Emit `mma_m16n8k16_s32_s8`: Warp MMA with s32 accumulator and s8 inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_mma_m16n8k16_s32_s8(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signed);
+    let (operands, last_op) = prepare_int_mma_7op(
+        ctx,
+        body,
+        args,
+        block_ptr,
+        prev_op,
+        value_map,
+        loc.clone(),
+        "mma_m16n8k16_s32_s8",
+    )?;
+    let mma_op = Operation::new(
+        ctx,
+        MmaM16N8K16S32S8Op::get_concrete_op_info(),
+        vec![i32_ty.into(); 4],
+        operands,
+        vec![],
+        0,
+    );
+    mma_op.deref_mut(ctx).set_loc(loc.clone());
+    if let Some(prev) = last_op {
+        mma_op.insert_after(ctx, prev);
+    } else {
+        mma_op.insert_at_front(block_ptr, ctx);
+    }
+    finish_int_mma(
+        ctx,
+        mma_op,
+        destination,
+        target,
+        block_ptr,
+        value_map,
+        block_map,
+        loc,
+        "mma_m16n8k16_s32_s8",
+    )
+}
+
+/// Emit `mma_m16n8k16_s32_u8`: Warp MMA with s32 accumulator and u8 inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_mma_m16n8k16_s32_u8(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signed);
+    let (operands, last_op) = prepare_int_mma_7op(
+        ctx,
+        body,
+        args,
+        block_ptr,
+        prev_op,
+        value_map,
+        loc.clone(),
+        "mma_m16n8k16_s32_u8",
+    )?;
+    let mma_op = Operation::new(
+        ctx,
+        MmaM16N8K16S32U8Op::get_concrete_op_info(),
+        vec![i32_ty.into(); 4],
+        operands,
+        vec![],
+        0,
+    );
+    mma_op.deref_mut(ctx).set_loc(loc.clone());
+    if let Some(prev) = last_op {
+        mma_op.insert_after(ctx, prev);
+    } else {
+        mma_op.insert_at_front(block_ptr, ctx);
+    }
+    finish_int_mma(
+        ctx,
+        mma_op,
+        destination,
+        target,
+        block_ptr,
+        value_map,
+        block_map,
+        loc,
+        "mma_m16n8k16_s32_u8",
+    )
 }

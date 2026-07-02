@@ -224,9 +224,300 @@ impl MmaM8N8K4F64Op {
     }
 }
 
+// =============================================================================
+// Integer MMA variants (all i32 operands/results)
+// =============================================================================
+
+/// Helper: verify that all operands and results are i32.
+fn verify_all_i32(
+    ctx: &Context,
+    op_ptr: Ptr<Operation>,
+    expected_operands: usize,
+    expected_results: usize,
+    op_name: &str,
+) -> Result<(), Error> {
+    let op = op_ptr.deref(ctx);
+    let operands: Vec<_> = op.operands().collect();
+    if operands.len() != expected_operands {
+        return verify_err!(
+            op.loc(),
+            "{} requires {} operands, got {}",
+            op_name,
+            expected_operands,
+            operands.len()
+        );
+    }
+    for (index, operand) in operands.iter().enumerate() {
+        let ty = operand.get_type(ctx);
+        let ty_ref = ty.deref(ctx);
+        let Some(integer) = ty_ref.downcast_ref::<IntegerType>() else {
+            return verify_err!(op.loc(), "{} operand {} must be i32", op_name, index);
+        };
+        if integer.width() != 32 {
+            return verify_err!(op.loc(), "{} operand {} must be i32", op_name, index);
+        }
+    }
+    if op.get_num_results() != expected_results {
+        return verify_err!(
+            op.loc(),
+            "{} requires {} results, got {}",
+            op_name,
+            expected_results,
+            op.get_num_results()
+        );
+    }
+    for index in 0..expected_results {
+        let ty = op.get_result(index).get_type(ctx);
+        let ty_ref = ty.deref(ctx);
+        let Some(integer) = ty_ref.downcast_ref::<IntegerType>() else {
+            return verify_err!(op.loc(), "{} result {} must be i32", op_name, index);
+        };
+        if integer.width() != 32 {
+            return verify_err!(op.loc(), "{} result {} must be i32", op_name, index);
+        }
+    }
+    Ok(())
+}
+
+/// Warp MMA: m16n8k32 with s32 accumulator and u8 inputs.
+///
+/// # Operands (10)
+///
+/// - operands 0-3: four i32 C accumulator registers
+/// - operands 4-7: four i32 A fragment registers (packed u8)
+/// - operands 8-9: two i32 B fragment registers (packed u8)
+///
+/// # Results (4)
+///
+/// - results 0-3: four i32 D accumulator registers
+#[pliron_op(
+    name = "nvvm.mma_m16n8k32_s32_u8",
+    format,
+    interfaces = [NOpdsInterface<10>, NResultsInterface<4>],
+)]
+pub struct MmaM16N8K32S32U8Op;
+
+impl Verify for MmaM16N8K32S32U8Op {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        verify_all_i32(ctx, self.get_operation(), 10, 4, "nvvm.mma_m16n8k32_s32_u8")
+    }
+}
+
+impl MmaM16N8K32S32U8Op {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaM16N8K32S32U8Op { op }
+    }
+}
+
+/// Warp MMA: m16n8k16 with s32 accumulator and s8 inputs.
+///
+/// # Operands (7)
+///
+/// - operands 0-3: four i32 C accumulator registers
+/// - operands 4-5: two i32 A fragment registers (packed s8)
+/// - operand 6: one i32 B fragment register (packed s8)
+///
+/// # Results (4)
+///
+/// - results 0-3: four i32 D accumulator registers
+#[pliron_op(
+    name = "nvvm.mma_m16n8k16_s32_s8",
+    format,
+    interfaces = [NOpdsInterface<7>, NResultsInterface<4>],
+)]
+pub struct MmaM16N8K16S32S8Op;
+
+impl Verify for MmaM16N8K16S32S8Op {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        verify_all_i32(ctx, self.get_operation(), 7, 4, "nvvm.mma_m16n8k16_s32_s8")
+    }
+}
+
+impl MmaM16N8K16S32S8Op {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaM16N8K16S32S8Op { op }
+    }
+}
+
+/// Warp MMA: m16n8k16 with s32 accumulator and u8 inputs.
+///
+/// # Operands (7)
+///
+/// - operands 0-3: four i32 C accumulator registers
+/// - operands 4-5: two i32 A fragment registers (packed u8)
+/// - operand 6: one i32 B fragment register (packed u8)
+///
+/// # Results (4)
+///
+/// - results 0-3: four i32 D accumulator registers
+#[pliron_op(
+    name = "nvvm.mma_m16n8k16_s32_u8",
+    format,
+    interfaces = [NOpdsInterface<7>, NResultsInterface<4>],
+)]
+pub struct MmaM16N8K16S32U8Op;
+
+impl Verify for MmaM16N8K16S32U8Op {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        verify_all_i32(ctx, self.get_operation(), 7, 4, "nvvm.mma_m16n8k16_s32_u8")
+    }
+}
+
+impl MmaM16N8K16S32U8Op {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaM16N8K16S32U8Op { op }
+    }
+}
+
+/// Warp MMA: m16n8k64 with s32 accumulator and s4 inputs.
+///
+/// # Operands (10)
+///
+/// - operands 0-3: four i32 C accumulator registers
+/// - operands 4-7: four i32 A fragment registers (packed s4)
+/// - operands 8-9: two i32 B fragment registers (packed s4)
+///
+/// # Results (4)
+///
+/// - results 0-3: four i32 D accumulator registers
+#[pliron_op(
+    name = "nvvm.mma_m16n8k64_s32_s4",
+    format,
+    interfaces = [NOpdsInterface<10>, NResultsInterface<4>],
+)]
+pub struct MmaM16N8K64S32S4Op;
+
+impl Verify for MmaM16N8K64S32S4Op {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        verify_all_i32(ctx, self.get_operation(), 10, 4, "nvvm.mma_m16n8k64_s32_s4")
+    }
+}
+
+impl MmaM16N8K64S32S4Op {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaM16N8K64S32S4Op { op }
+    }
+}
+
+/// Warp MMA: m16n8k64 with s32 accumulator and u4 inputs.
+///
+/// # Operands (10)
+///
+/// - operands 0-3: four i32 C accumulator registers
+/// - operands 4-7: four i32 A fragment registers (packed u4)
+/// - operands 8-9: two i32 B fragment registers (packed u4)
+///
+/// # Results (4)
+///
+/// - results 0-3: four i32 D accumulator registers
+#[pliron_op(
+    name = "nvvm.mma_m16n8k64_s32_u4",
+    format,
+    interfaces = [NOpdsInterface<10>, NResultsInterface<4>],
+)]
+pub struct MmaM16N8K64S32U4Op;
+
+impl Verify for MmaM16N8K64S32U4Op {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        verify_all_i32(ctx, self.get_operation(), 10, 4, "nvvm.mma_m16n8k64_s32_u4")
+    }
+}
+
+impl MmaM16N8K64S32U4Op {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaM16N8K64S32U4Op { op }
+    }
+}
+
+/// Warp MMA: m16n8k256 with s32 accumulator, b1 inputs, AND.POPC operation.
+///
+/// # Operands (10)
+///
+/// - operands 0-3: four i32 C accumulator registers
+/// - operands 4-7: four i32 A fragment registers (packed b1)
+/// - operands 8-9: two i32 B fragment registers (packed b1)
+///
+/// # Results (4)
+///
+/// - results 0-3: four i32 D accumulator registers
+#[pliron_op(
+    name = "nvvm.mma_m16n8k256_s32_b1_and",
+    format,
+    interfaces = [NOpdsInterface<10>, NResultsInterface<4>],
+)]
+pub struct MmaM16N8K256S32B1AndOp;
+
+impl Verify for MmaM16N8K256S32B1AndOp {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        verify_all_i32(
+            ctx,
+            self.get_operation(),
+            10,
+            4,
+            "nvvm.mma_m16n8k256_s32_b1_and",
+        )
+    }
+}
+
+impl MmaM16N8K256S32B1AndOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaM16N8K256S32B1AndOp { op }
+    }
+}
+
+/// Warp MMA: m16n8k256 with s32 accumulator, b1 inputs, XOR.POPC operation.
+///
+/// # Operands (10)
+///
+/// - operands 0-3: four i32 C accumulator registers
+/// - operands 4-7: four i32 A fragment registers (packed b1)
+/// - operands 8-9: two i32 B fragment registers (packed b1)
+///
+/// # Results (4)
+///
+/// - results 0-3: four i32 D accumulator registers
+#[pliron_op(
+    name = "nvvm.mma_m16n8k256_s32_b1_xor",
+    format,
+    interfaces = [NOpdsInterface<10>, NResultsInterface<4>],
+)]
+pub struct MmaM16N8K256S32B1XorOp;
+
+impl Verify for MmaM16N8K256S32B1XorOp {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        verify_all_i32(
+            ctx,
+            self.get_operation(),
+            10,
+            4,
+            "nvvm.mma_m16n8k256_s32_b1_xor",
+        )
+    }
+}
+
+impl MmaM16N8K256S32B1XorOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaM16N8K256S32B1XorOp { op }
+    }
+}
+
 /// Register WMMA operations with the context.
 pub(super) fn register(ctx: &mut Context) {
     MovmatrixTransB16Op::register(ctx);
     MmaM16N8K16F32Bf16Op::register(ctx);
     MmaM8N8K4F64Op::register(ctx);
+    MmaM16N8K32S32U8Op::register(ctx);
+    MmaM16N8K16S32S8Op::register(ctx);
+    MmaM16N8K16S32U8Op::register(ctx);
+    MmaM16N8K64S32S4Op::register(ctx);
+    MmaM16N8K64S32U4Op::register(ctx);
+    MmaM16N8K256S32B1AndOp::register(ctx);
+    MmaM16N8K256S32B1XorOp::register(ctx);
 }

@@ -1259,6 +1259,47 @@ fn contains_mma_m8n8k4_f64_features(contents: &str) -> bool {
     contains_instruction_mnemonic(contents, "mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64")
 }
 
+/// Checks for the u8 integer MMA with m16n8k32 shape (PTX 7.0, sm_80+).
+fn contains_mma_m16n8k32_s32_u8_features(contents: &str) -> bool {
+    contains_instruction_mnemonic(contents, "mma.sync.aligned.m16n8k32.row.col.s32.u8.u8.s32")
+}
+
+/// Checks for the s8 integer MMA with m16n8k16 shape (PTX 7.0, sm_80+).
+fn contains_mma_m16n8k16_s32_s8_features(contents: &str) -> bool {
+    contains_instruction_mnemonic(contents, "mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32")
+}
+
+/// Checks for the u8 integer MMA with m16n8k16 shape (PTX 7.0, sm_80+).
+fn contains_mma_m16n8k16_s32_u8_features(contents: &str) -> bool {
+    contains_instruction_mnemonic(contents, "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32")
+}
+
+/// Checks for the s4 integer MMA with m16n8k64 shape (PTX 7.0, sm_80+).
+fn contains_mma_m16n8k64_s32_s4_features(contents: &str) -> bool {
+    contains_instruction_mnemonic(contents, "mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32")
+}
+
+/// Checks for the u4 integer MMA with m16n8k64 shape (PTX 7.0, sm_80+).
+fn contains_mma_m16n8k64_s32_u4_features(contents: &str) -> bool {
+    contains_instruction_mnemonic(contents, "mma.sync.aligned.m16n8k64.row.col.s32.u4.u4.s32")
+}
+
+/// Checks for the b1 AND.POPC MMA with m16n8k256 shape (PTX 7.0, sm_80+).
+fn contains_mma_m16n8k256_s32_b1_and_features(contents: &str) -> bool {
+    contains_instruction_mnemonic(
+        contents,
+        "mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.and.popc",
+    )
+}
+
+/// Checks for the b1 XOR.POPC MMA with m16n8k256 shape (PTX 7.0, sm_80+).
+fn contains_mma_m16n8k256_s32_b1_xor_features(contents: &str) -> bool {
+    contains_instruction_mnemonic(
+        contents,
+        "mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.xor.popc",
+    )
+}
+
 fn contains_instruction_mnemonic(contents: &str, mnemonic: &str) -> bool {
     contents.match_indices(mnemonic).any(|(index, _)| {
         let preceding = &contents[..index];
@@ -1334,6 +1375,13 @@ fn contains_sm80_features(contents: &str) -> bool {
     .iter()
     .any(|mnemonic| contains_instruction_mnemonic(contents, mnemonic))
         || contains_mma_m8n8k4_f64_features(contents)
+        || contains_mma_m16n8k32_s32_u8_features(contents)
+        || contains_mma_m16n8k16_s32_s8_features(contents)
+        || contains_mma_m16n8k16_s32_u8_features(contents)
+        || contains_mma_m16n8k64_s32_s4_features(contents)
+        || contains_mma_m16n8k64_s32_u4_features(contents)
+        || contains_mma_m16n8k256_s32_b1_and_features(contents)
+        || contains_mma_m16n8k256_s32_b1_xor_features(contents)
         || contents
             .split(';')
             .any(|statement| statement.contains("cvt.") && statement.contains(".bf16x2.f32"))
@@ -1783,6 +1831,13 @@ fn detect_module_requirements_in_llvm_text(contents: &str) -> ModuleRequirements
         || contents.contains("redux.sync")
         || contains_mma_m16n8k16_f32_bf16_features(contents)
         || contains_mma_m8n8k4_f64_features(contents)
+        || contains_mma_m16n8k32_s32_u8_features(contents)
+        || contains_mma_m16n8k16_s32_s8_features(contents)
+        || contains_mma_m16n8k16_s32_u8_features(contents)
+        || contains_mma_m16n8k64_s32_s4_features(contents)
+        || contains_mma_m16n8k64_s32_u4_features(contents)
+        || contains_mma_m16n8k256_s32_b1_and_features(contents)
+        || contains_mma_m16n8k256_s32_b1_xor_features(contents)
     {
         ptx_isa = ptx_isa.max(PtxIsaRequirement::Ptx70);
     }
@@ -3326,6 +3381,55 @@ mod tests {
                 ptx_isa: PtxIsaRequirement::Ptx78,
             }
         );
+    }
+
+    #[test]
+    fn integer_mma_detection_applies_sm80_and_ptx70_floors() {
+        let mnemonics = [
+            (
+                "mma.sync.aligned.m16n8k32.row.col.s32.u8.u8.s32 {$0,$1,$2,$3}, {$8,$9,$10,$11}, {$12,$13}, {$4,$5,$6,$7};",
+                contains_mma_m16n8k32_s32_u8_features as fn(&str) -> bool,
+            ),
+            (
+                "mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32 {$0,$1,$2,$3}, {$8,$9}, {$10}, {$4,$5,$6,$7};",
+                contains_mma_m16n8k16_s32_s8_features as fn(&str) -> bool,
+            ),
+            (
+                "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32 {$0,$1,$2,$3}, {$8,$9}, {$10}, {$4,$5,$6,$7};",
+                contains_mma_m16n8k16_s32_u8_features as fn(&str) -> bool,
+            ),
+            (
+                "mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 {$0,$1,$2,$3}, {$8,$9,$10,$11}, {$12,$13}, {$4,$5,$6,$7};",
+                contains_mma_m16n8k64_s32_s4_features as fn(&str) -> bool,
+            ),
+            (
+                "mma.sync.aligned.m16n8k64.row.col.s32.u4.u4.s32 {$0,$1,$2,$3}, {$8,$9,$10,$11}, {$12,$13}, {$4,$5,$6,$7};",
+                contains_mma_m16n8k64_s32_u4_features as fn(&str) -> bool,
+            ),
+            (
+                "mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.and.popc {$0,$1,$2,$3}, {$8,$9,$10,$11}, {$12,$13}, {$4,$5,$6,$7};",
+                contains_mma_m16n8k256_s32_b1_and_features as fn(&str) -> bool,
+            ),
+            (
+                "mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.xor.popc {$0,$1,$2,$3}, {$8,$9,$10,$11}, {$12,$13}, {$4,$5,$6,$7};",
+                contains_mma_m16n8k256_s32_b1_xor_features as fn(&str) -> bool,
+            ),
+        ];
+        for (mnemonic, detect_fn) in &mnemonics {
+            assert!(detect_fn(mnemonic), "failed to detect: {mnemonic}");
+            assert!(contains_sm80_features(mnemonic), "sm80 missed: {mnemonic}");
+            let requirements = detect_module_requirements_in_llvm_text(mnemonic);
+            assert_eq!(
+                requirements.features,
+                DetectedFeatures::Sm80,
+                "wrong features for: {mnemonic}"
+            );
+            assert_eq!(
+                requirements.ptx_isa,
+                PtxIsaRequirement::Ptx70,
+                "wrong PTX ISA for: {mnemonic}"
+            );
+        }
     }
 
     #[test]

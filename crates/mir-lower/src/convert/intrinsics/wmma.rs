@@ -145,3 +145,251 @@ pub(crate) fn convert_mma_m8n8k4_f64(
     rewriter.replace_operation_with_values(ctx, op, results);
     Ok(())
 }
+
+// =============================================================================
+// Integer MMA lowering: 10-operand variants
+// =============================================================================
+
+/// Generic converter for 10-operand integer MMA ops.
+///
+/// Operand order: C[0..4], A[0..4], B[0..2]. All i32.
+fn convert_int_mma_10op(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    template: &str,
+    op_name: &str,
+) -> Result<()> {
+    let operands: Vec<_> = op.deref(ctx).operands().collect();
+    if operands.len() != 10 {
+        return pliron::input_err_noloc!(
+            "{} requires 10 register operands, got {}",
+            op_name,
+            operands.len()
+        );
+    }
+
+    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signless);
+    let result_ty = llvm_types::StructType::get_unnamed(ctx, vec![i32_ty.into(); 4]);
+    let constraints = "=r,=r,=r,=r,r,r,r,r,r,r,r,r,r,r";
+    let inline_asm = inline_asm_convergent(
+        ctx,
+        rewriter,
+        result_ty.into(),
+        operands,
+        template,
+        constraints,
+    );
+
+    let aggregate = inline_asm.deref(ctx).get_result(0);
+    let mut results = Vec::with_capacity(4);
+    for index in 0..4u32 {
+        let extract = llvm::ExtractValueOp::new(ctx, aggregate, vec![index])
+            .map_err(|error| pliron::input_error_noloc!("{}", error))?;
+        rewriter.insert_operation(ctx, extract.get_operation());
+        results.push(extract.get_operation().deref(ctx).get_result(0));
+    }
+    rewriter.replace_operation_with_values(ctx, op, results);
+    Ok(())
+}
+
+/// Convert `mma_m16n8k32_s32_u8` to inline PTX.
+pub(crate) fn convert_mma_m16n8k32_s32_u8(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    convert_int_mma_10op(
+        ctx,
+        rewriter,
+        op,
+        concat!(
+            "mma.sync.aligned.m16n8k32.row.col.s32.u8.u8.s32 ",
+            "{$0, $1, $2, $3}, ",
+            "{$8, $9, $10, $11}, ",
+            "{$12, $13}, ",
+            "{$4, $5, $6, $7};"
+        ),
+        "mma_m16n8k32_s32_u8",
+    )
+}
+
+/// Convert `mma_m16n8k64_s32_s4` to inline PTX.
+pub(crate) fn convert_mma_m16n8k64_s32_s4(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    convert_int_mma_10op(
+        ctx,
+        rewriter,
+        op,
+        concat!(
+            "mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 ",
+            "{$0, $1, $2, $3}, ",
+            "{$8, $9, $10, $11}, ",
+            "{$12, $13}, ",
+            "{$4, $5, $6, $7};"
+        ),
+        "mma_m16n8k64_s32_s4",
+    )
+}
+
+/// Convert `mma_m16n8k64_s32_u4` to inline PTX.
+pub(crate) fn convert_mma_m16n8k64_s32_u4(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    convert_int_mma_10op(
+        ctx,
+        rewriter,
+        op,
+        concat!(
+            "mma.sync.aligned.m16n8k64.row.col.s32.u4.u4.s32 ",
+            "{$0, $1, $2, $3}, ",
+            "{$8, $9, $10, $11}, ",
+            "{$12, $13}, ",
+            "{$4, $5, $6, $7};"
+        ),
+        "mma_m16n8k64_s32_u4",
+    )
+}
+
+/// Convert `mma_m16n8k256_s32_b1_and` to inline PTX.
+pub(crate) fn convert_mma_m16n8k256_s32_b1_and(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    convert_int_mma_10op(
+        ctx,
+        rewriter,
+        op,
+        concat!(
+            "mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.and.popc ",
+            "{$0, $1, $2, $3}, ",
+            "{$8, $9, $10, $11}, ",
+            "{$12, $13}, ",
+            "{$4, $5, $6, $7};"
+        ),
+        "mma_m16n8k256_s32_b1_and",
+    )
+}
+
+/// Convert `mma_m16n8k256_s32_b1_xor` to inline PTX.
+pub(crate) fn convert_mma_m16n8k256_s32_b1_xor(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    convert_int_mma_10op(
+        ctx,
+        rewriter,
+        op,
+        concat!(
+            "mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.xor.popc ",
+            "{$0, $1, $2, $3}, ",
+            "{$8, $9, $10, $11}, ",
+            "{$12, $13}, ",
+            "{$4, $5, $6, $7};"
+        ),
+        "mma_m16n8k256_s32_b1_xor",
+    )
+}
+
+// =============================================================================
+// Integer MMA lowering: 7-operand variants
+// =============================================================================
+
+/// Generic converter for 7-operand integer MMA ops.
+///
+/// Operand order: C[0..4], A[0..2], B[0]. All i32.
+fn convert_int_mma_7op(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    template: &str,
+    op_name: &str,
+) -> Result<()> {
+    let operands: Vec<_> = op.deref(ctx).operands().collect();
+    if operands.len() != 7 {
+        return pliron::input_err_noloc!(
+            "{} requires 7 register operands, got {}",
+            op_name,
+            operands.len()
+        );
+    }
+
+    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signless);
+    let result_ty = llvm_types::StructType::get_unnamed(ctx, vec![i32_ty.into(); 4]);
+    let constraints = "=r,=r,=r,=r,r,r,r,r,r,r,r";
+    let inline_asm = inline_asm_convergent(
+        ctx,
+        rewriter,
+        result_ty.into(),
+        operands,
+        template,
+        constraints,
+    );
+
+    let aggregate = inline_asm.deref(ctx).get_result(0);
+    let mut results = Vec::with_capacity(4);
+    for index in 0..4u32 {
+        let extract = llvm::ExtractValueOp::new(ctx, aggregate, vec![index])
+            .map_err(|error| pliron::input_error_noloc!("{}", error))?;
+        rewriter.insert_operation(ctx, extract.get_operation());
+        results.push(extract.get_operation().deref(ctx).get_result(0));
+    }
+    rewriter.replace_operation_with_values(ctx, op, results);
+    Ok(())
+}
+
+/// Convert `mma_m16n8k16_s32_s8` to inline PTX.
+pub(crate) fn convert_mma_m16n8k16_s32_s8(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    convert_int_mma_7op(
+        ctx,
+        rewriter,
+        op,
+        concat!(
+            "mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32 ",
+            "{$0, $1, $2, $3}, ",
+            "{$8, $9}, ",
+            "{$10}, ",
+            "{$4, $5, $6, $7};"
+        ),
+        "mma_m16n8k16_s32_s8",
+    )
+}
+
+/// Convert `mma_m16n8k16_s32_u8` to inline PTX.
+pub(crate) fn convert_mma_m16n8k16_s32_u8(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    convert_int_mma_7op(
+        ctx,
+        rewriter,
+        op,
+        concat!(
+            "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32 ",
+            "{$0, $1, $2, $3}, ",
+            "{$8, $9}, ",
+            "{$10}, ",
+            "{$4, $5, $6, $7};"
+        ),
+        "mma_m16n8k16_s32_u8",
+    )
+}
