@@ -145,3 +145,189 @@ pub(crate) fn convert_mma_m8n8k4_f64(
     rewriter.replace_operation_with_values(ctx, op, results);
     Ok(())
 }
+
+/// Convert `mma_m16n8k8_f32_bf16` to inline PTX assembly.
+///
+/// Operand order is C[0..4], A[0..2], B. The four D registers are
+/// returned as an LLVM struct and then split back into the dialect op's four
+/// SSA results.
+pub(crate) fn convert_mma_m16n8k8_f32_bf16(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    let operands: Vec<_> = op.deref(ctx).operands().collect();
+    if operands.len() != 7 {
+        return pliron::input_err_noloc!(
+            "mma_m16n8k8_f32_bf16 requires 7 register operands, got {}",
+            operands.len()
+        );
+    }
+
+    let f32_ty = FP32Type::get(ctx);
+    let result_ty = llvm_types::StructType::get_unnamed(ctx, vec![f32_ty.into(); 4]);
+    let template = concat!(
+        "mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32 ",
+        "{$0, $1, $2, $3}, ",
+        "{$8, $9}, ",
+        "{$10}, ",
+        "{$4, $5, $6, $7};"
+    );
+    let constraints = "=f,=f,=f,=f,f,f,f,f,r,r,r";
+    let inline_asm = inline_asm_convergent(
+        ctx,
+        rewriter,
+        result_ty.into(),
+        operands,
+        template,
+        constraints,
+    );
+
+    let aggregate = inline_asm.deref(ctx).get_result(0);
+    let mut results = Vec::with_capacity(4);
+    for index in 0..4 {
+        let extract = llvm::ExtractValueOp::new(ctx, aggregate, vec![index as u32])
+            .map_err(|error| pliron::input_error_noloc!("{}", error))?;
+        rewriter.insert_operation(ctx, extract.get_operation());
+        results.push(extract.get_operation().deref(ctx).get_result(0));
+    }
+    rewriter.replace_operation_with_values(ctx, op, results);
+    Ok(())
+}
+
+/// Convert `mma_m16n8k4_f32_tf32` to inline PTX assembly.
+///
+/// Same register layout as bf16 m16n8k8 (7 operands, 4 results).
+pub(crate) fn convert_mma_m16n8k4_f32_tf32(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    let operands: Vec<_> = op.deref(ctx).operands().collect();
+    if operands.len() != 7 {
+        return pliron::input_err_noloc!(
+            "mma_m16n8k4_f32_tf32 requires 7 register operands, got {}",
+            operands.len()
+        );
+    }
+
+    let f32_ty = FP32Type::get(ctx);
+    let result_ty = llvm_types::StructType::get_unnamed(ctx, vec![f32_ty.into(); 4]);
+    let template = concat!(
+        "mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32 ",
+        "{$0, $1, $2, $3}, ",
+        "{$8, $9}, ",
+        "{$10}, ",
+        "{$4, $5, $6, $7};"
+    );
+    let constraints = "=f,=f,=f,=f,f,f,f,f,r,r,r";
+    let inline_asm = inline_asm_convergent(
+        ctx,
+        rewriter,
+        result_ty.into(),
+        operands,
+        template,
+        constraints,
+    );
+
+    let aggregate = inline_asm.deref(ctx).get_result(0);
+    let mut results = Vec::with_capacity(4);
+    for index in 0..4 {
+        let extract = llvm::ExtractValueOp::new(ctx, aggregate, vec![index as u32])
+            .map_err(|error| pliron::input_error_noloc!("{}", error))?;
+        rewriter.insert_operation(ctx, extract.get_operation());
+        results.push(extract.get_operation().deref(ctx).get_result(0));
+    }
+    rewriter.replace_operation_with_values(ctx, op, results);
+    Ok(())
+}
+
+/// Convert `mma_m16n8k4_f64` to inline PTX assembly.
+///
+/// 7 operands (c0-c3, a0-a1, b), 4 results (d0-d3), all f64.
+pub(crate) fn convert_mma_m16n8k4_f64(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    let operands: Vec<_> = op.deref(ctx).operands().collect();
+    if operands.len() != 7 {
+        return pliron::input_err_noloc!(
+            "mma_m16n8k4_f64 requires 7 f64 operands (c0-c3, a0-a1, b), got {}",
+            operands.len()
+        );
+    }
+
+    let f64_ty = FP64Type::get(ctx);
+    let result_ty = llvm_types::StructType::get_unnamed(ctx, vec![f64_ty.into(); 4]);
+    let inline_asm = inline_asm_convergent(
+        ctx,
+        rewriter,
+        result_ty.into(),
+        operands,
+        "mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64 \
+         {$0, $1, $2, $3}, {$8, $9}, {$10}, {$4, $5, $6, $7};",
+        "=d,=d,=d,=d,d,d,d,d,d,d,d",
+    );
+
+    let aggregate = inline_asm.deref(ctx).get_result(0);
+    let mut results = Vec::with_capacity(4);
+    for index in 0..4 {
+        let extract = llvm::ExtractValueOp::new(ctx, aggregate, vec![index])?;
+        rewriter.insert_operation(ctx, extract.get_operation());
+        results.push(extract.get_operation().deref(ctx).get_result(0));
+    }
+    rewriter.replace_operation_with_values(ctx, op, results);
+    Ok(())
+}
+
+/// Convert `mma_m16n8k16_f16_f16` to inline PTX assembly.
+///
+/// 8 operands (c0-c1, a0-a3, b0-b1), 2 results (d0-d1), all i32 (packed f16x2).
+pub(crate) fn convert_mma_m16n8k16_f16_f16(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    let operands: Vec<_> = op.deref(ctx).operands().collect();
+    if operands.len() != 8 {
+        return pliron::input_err_noloc!(
+            "mma_m16n8k16_f16_f16 requires 8 i32 operands, got {}",
+            operands.len()
+        );
+    }
+
+    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signless);
+    let result_ty = llvm_types::StructType::get_unnamed(ctx, vec![i32_ty.into(); 2]);
+    let template = concat!(
+        "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 ",
+        "{$0, $1}, ",
+        "{$4, $5, $6, $7}, ",
+        "{$8, $9}, ",
+        "{$2, $3};"
+    );
+    let constraints = "=r,=r,r,r,r,r,r,r,r,r";
+    let inline_asm = inline_asm_convergent(
+        ctx,
+        rewriter,
+        result_ty.into(),
+        operands,
+        template,
+        constraints,
+    );
+
+    let aggregate = inline_asm.deref(ctx).get_result(0);
+    let mut results = Vec::with_capacity(2);
+    for index in 0..2 {
+        let extract = llvm::ExtractValueOp::new(ctx, aggregate, vec![index as u32])
+            .map_err(|error| pliron::input_error_noloc!("{}", error))?;
+        rewriter.insert_operation(ctx, extract.get_operation());
+        results.push(extract.get_operation().deref(ctx).get_result(0));
+    }
+    rewriter.replace_operation_with_values(ctx, op, results);
+    Ok(())
+}

@@ -1259,6 +1259,35 @@ fn contains_mma_m8n8k4_f64_features(contents: &str) -> bool {
     contains_instruction_mnemonic(contents, "mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64")
 }
 
+/// Checks for the BF16 m16n8k8 MMA operation (PTX 7.0, sm_80+).
+fn contains_mma_m16n8k8_f32_bf16_features(contents: &str) -> bool {
+    contains_instruction_mnemonic(
+        contents,
+        "mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32",
+    )
+}
+
+/// Checks for the TF32 m16n8k4 MMA operation (PTX 7.0, sm_80+).
+fn contains_mma_m16n8k4_f32_tf32_features(contents: &str) -> bool {
+    contains_instruction_mnemonic(
+        contents,
+        "mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32",
+    )
+}
+
+/// Checks for the FP64 m16n8k4 MMA operation (PTX 7.0, sm_80+).
+fn contains_mma_m16n8k4_f64_features(contents: &str) -> bool {
+    contains_instruction_mnemonic(contents, "mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64")
+}
+
+/// Checks for the F16-accumulator m16n8k16 MMA operation (PTX 7.0, sm_80+).
+fn contains_mma_m16n8k16_f16_f16_features(contents: &str) -> bool {
+    contains_instruction_mnemonic(
+        contents,
+        "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16",
+    )
+}
+
 fn contains_instruction_mnemonic(contents: &str, mnemonic: &str) -> bool {
     contents.match_indices(mnemonic).any(|(index, _)| {
         let preceding = &contents[..index];
@@ -1334,6 +1363,10 @@ fn contains_sm80_features(contents: &str) -> bool {
     .iter()
     .any(|mnemonic| contains_instruction_mnemonic(contents, mnemonic))
         || contains_mma_m8n8k4_f64_features(contents)
+        || contains_mma_m16n8k8_f32_bf16_features(contents)
+        || contains_mma_m16n8k4_f32_tf32_features(contents)
+        || contains_mma_m16n8k4_f64_features(contents)
+        || contains_mma_m16n8k16_f16_f16_features(contents)
         || contents
             .split(';')
             .any(|statement| statement.contains("cvt.") && statement.contains(".bf16x2.f32"))
@@ -1783,6 +1816,10 @@ fn detect_module_requirements_in_llvm_text(contents: &str) -> ModuleRequirements
         || contents.contains("redux.sync")
         || contains_mma_m16n8k16_f32_bf16_features(contents)
         || contains_mma_m8n8k4_f64_features(contents)
+        || contains_mma_m16n8k8_f32_bf16_features(contents)
+        || contains_mma_m16n8k4_f32_tf32_features(contents)
+        || contains_mma_m16n8k4_f64_features(contents)
+        || contains_mma_m16n8k16_f16_f16_features(contents)
     {
         ptx_isa = ptx_isa.max(PtxIsaRequirement::Ptx70);
     }
@@ -3280,7 +3317,6 @@ mod tests {
         assert_eq!(select_target(requirements.features).unwrap(), "sm_80");
 
         for near_miss in [
-            "mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64 {$0, $1}, {$2}, {$3}, {$4, $5};",
             "mma.sync.aligned.m8n8k4.col.row.f64.f64.f64.f64 {$0, $1}, {$2}, {$3}, {$4, $5};",
             "mma.sync.aligned.m8n8k4.row.col.f32.f64.f64.f64 {$0, $1}, {$2}, {$3}, {$4, $5};",
             "mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64x2 {$0, $1}, {$2}, {$3}, {$4, $5};",
@@ -3326,6 +3362,174 @@ mod tests {
                 ptx_isa: PtxIsaRequirement::Ptx78,
             }
         );
+    }
+
+    #[test]
+    fn mma_m16n8k8_f32_bf16_detection_enforces_sm80_and_ptx70() {
+        let mnemonic = concat!(
+            "mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32 ",
+            "{$0, $1, $2, $3}, {$8, $9}, {$10}, {$4, $5, $6, $7};"
+        );
+        for spelling in [
+            mnemonic,
+            "mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32\t{$0}, {$1}, {$2}, {$3};",
+            ";mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32 {$0}, {$1}, {$2}, {$3};",
+            "\"mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32 {$0}, {$1}, {$2}, {$3};",
+        ] {
+            assert!(
+                contains_mma_m16n8k8_f32_bf16_features(spelling),
+                "missed {spelling:?}"
+            );
+        }
+
+        let requirements = detect_module_requirements_in_llvm_text(mnemonic);
+        assert_eq!(
+            requirements,
+            ModuleRequirements {
+                features: DetectedFeatures::Sm80,
+                ptx_isa: PtxIsaRequirement::Ptx70,
+            }
+        );
+
+        for near_miss in [
+            "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {$0}, {$1}, {$2}, {$3};",
+            "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {$0}, {$1}, {$2}, {$3};",
+            "not_mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32 {$0}, {$1}, {$2}, {$3};",
+            "mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32x {$0}, {$1}, {$2}, {$3};",
+            "$mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32 {$0}, {$1}, {$2}, {$3};",
+            "%mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32 {$0}, {$1}, {$2}, {$3};",
+        ] {
+            assert!(
+                !contains_mma_m16n8k8_f32_bf16_features(near_miss),
+                "matched {near_miss:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mma_m16n8k4_f32_tf32_detection_enforces_sm80_and_ptx70() {
+        let mnemonic = concat!(
+            "mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32 ",
+            "{$0, $1, $2, $3}, {$8, $9}, {$10}, {$4, $5, $6, $7};"
+        );
+        for spelling in [
+            mnemonic,
+            "mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32\t{$0}, {$1}, {$2}, {$3};",
+            ";mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32 {$0}, {$1}, {$2}, {$3};",
+            "\"mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32 {$0}, {$1}, {$2}, {$3};",
+        ] {
+            assert!(
+                contains_mma_m16n8k4_f32_tf32_features(spelling),
+                "missed {spelling:?}"
+            );
+        }
+
+        let requirements = detect_module_requirements_in_llvm_text(mnemonic);
+        assert_eq!(
+            requirements,
+            ModuleRequirements {
+                features: DetectedFeatures::Sm80,
+                ptx_isa: PtxIsaRequirement::Ptx70,
+            }
+        );
+
+        for near_miss in [
+            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {$0}, {$1}, {$2}, {$3};",
+            "mma.sync.aligned.m16n8k4.row.col.f32.bf16.bf16.f32 {$0}, {$1}, {$2}, {$3};",
+            "not_mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32 {$0}, {$1}, {$2}, {$3};",
+            "mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32x {$0}, {$1}, {$2}, {$3};",
+            "$mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32 {$0}, {$1}, {$2}, {$3};",
+            "%mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32 {$0}, {$1}, {$2}, {$3};",
+        ] {
+            assert!(
+                !contains_mma_m16n8k4_f32_tf32_features(near_miss),
+                "matched {near_miss:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mma_m16n8k4_f64_detection_enforces_sm80_and_ptx70() {
+        let mnemonic = concat!(
+            "mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64 ",
+            "{$0, $1, $2, $3}, {$8, $9}, {$10}, {$4, $5, $6, $7};"
+        );
+        for spelling in [
+            mnemonic,
+            "mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64\t{$0, $1}, {$2}, {$3}, {$4, $5};",
+            ";mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64 {$0, $1}, {$2}, {$3}, {$4, $5};",
+            "\"mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64 {$0, $1}, {$2}, {$3}, {$4, $5};",
+        ] {
+            assert!(
+                contains_mma_m16n8k4_f64_features(spelling),
+                "missed {spelling:?}"
+            );
+        }
+
+        let requirements = detect_module_requirements_in_llvm_text(mnemonic);
+        assert_eq!(
+            requirements,
+            ModuleRequirements {
+                features: DetectedFeatures::Sm80,
+                ptx_isa: PtxIsaRequirement::Ptx70,
+            }
+        );
+
+        for near_miss in [
+            "mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 {$0, $1}, {$2}, {$3}, {$4, $5};",
+            "mma.sync.aligned.m16n8k4.row.col.f32.f64.f64.f64 {$0, $1}, {$2}, {$3}, {$4, $5};",
+            "not_mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64 {$0, $1}, {$2}, {$3}, {$4, $5};",
+            "mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64x {$0, $1}, {$2}, {$3}, {$4, $5};",
+            "$mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64 {$0, $1}, {$2}, {$3}, {$4, $5};",
+            "%mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64 {$0, $1}, {$2}, {$3}, {$4, $5};",
+        ] {
+            assert!(
+                !contains_mma_m16n8k4_f64_features(near_miss),
+                "matched {near_miss:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mma_m16n8k16_f16_f16_detection_enforces_sm80_and_ptx70() {
+        let mnemonic = concat!(
+            "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 ",
+            "{$0, $1}, {$4, $5, $6, $7}, {$8, $9}, {$2, $3};"
+        );
+        for spelling in [
+            mnemonic,
+            "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16\t{$0}, {$1}, {$2}, {$3};",
+            ";mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {$0}, {$1}, {$2}, {$3};",
+            "\"mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {$0}, {$1}, {$2}, {$3};",
+        ] {
+            assert!(
+                contains_mma_m16n8k16_f16_f16_features(spelling),
+                "missed {spelling:?}"
+            );
+        }
+
+        let requirements = detect_module_requirements_in_llvm_text(mnemonic);
+        assert_eq!(
+            requirements,
+            ModuleRequirements {
+                features: DetectedFeatures::Sm80,
+                ptx_isa: PtxIsaRequirement::Ptx70,
+            }
+        );
+
+        for near_miss in [
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {$0}, {$1}, {$2}, {$3};",
+            "mma.sync.aligned.m16n8k8.row.col.f16.f16.f16.f16 {$0}, {$1}, {$2}, {$3};",
+            "not_mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {$0}, {$1}, {$2}, {$3};",
+            "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16x {$0}, {$1}, {$2}, {$3};",
+            "$mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {$0}, {$1}, {$2}, {$3};",
+            "%mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {$0}, {$1}, {$2}, {$3};",
+        ] {
+            assert!(
+                !contains_mma_m16n8k16_f16_f16_features(near_miss),
+                "matched {near_miss:?}"
+            );
+        }
     }
 
     #[test]
