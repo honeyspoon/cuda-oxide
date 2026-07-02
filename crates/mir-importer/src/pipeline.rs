@@ -1293,6 +1293,23 @@ fn contains_mma_m16n8k16_f32_f16_features(contents: &str) -> bool {
     )
 }
 
+/// Checks for mixed-signedness INT8 mma.sync variants (PTX 7.0, sm_80+).
+fn contains_mma_int8_mixed_features(contents: &str) -> bool {
+    contains_instruction_mnemonic(contents, "mma.sync.aligned.m16n8k32.row.col.s32.s8.u8.s32")
+        || contains_instruction_mnemonic(
+            contents,
+            "mma.sync.aligned.m16n8k32.row.col.s32.u8.s8.s32",
+        )
+        || contains_instruction_mnemonic(
+            contents,
+            "mma.sync.aligned.m16n8k16.row.col.s32.s8.u8.s32",
+        )
+        || contains_instruction_mnemonic(
+            contents,
+            "mma.sync.aligned.m16n8k16.row.col.s32.u8.s8.s32",
+        )
+}
+
 fn contains_instruction_mnemonic(contents: &str, mnemonic: &str) -> bool {
     contents.match_indices(mnemonic).any(|(index, _)| {
         let preceding = &contents[..index];
@@ -1385,6 +1402,7 @@ fn contains_sm80_features(contents: &str) -> bool {
         || contains_mma_m16n8k16_f32_f16_features(contents)
         || contains_mma_m16n8k8_f32_tf32_features(contents)
         || contains_mma_m16n8k32_s32_s8_features(contents)
+        || contains_mma_int8_mixed_features(contents)
 }
 
 /// Checks for TMA/mbarrier instructions (Hopper+ compatible with Blackwell).
@@ -1823,6 +1841,7 @@ fn detect_module_requirements_in_llvm_text(contents: &str) -> ModuleRequirements
         || contains_mma_m16n8k8_f32_tf32_features(contents)
         || contains_mma_m16n8k32_s32_s8_features(contents)
         || contains_mma_m8n8k4_f64_features(contents)
+        || contains_mma_int8_mixed_features(contents)
     {
         ptx_isa = ptx_isa.max(PtxIsaRequirement::Ptx70);
     }
