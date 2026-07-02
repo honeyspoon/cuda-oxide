@@ -14,8 +14,8 @@ use crate::translator::{rvalue, types};
 use dialect_mir::attributes::MirCastKindAttr;
 use dialect_mir::ops::{MirCastOp, MirConstantOp, MirDivOp, MirSubOp};
 use dialect_nvvm::ops::{
-    CvtF32x2Bf16x2Op, StmatrixM8n8X2Op, StmatrixM8n8X2TransOp, StmatrixM8n8X4Op,
-    StmatrixM8n8X4TransOp,
+    CvtF32x2Bf16x2Op, StmatrixM8n8X1Op, StmatrixM8n8X1TransOp, StmatrixM8n8X2Op,
+    StmatrixM8n8X2TransOp, StmatrixM8n8X4Op, StmatrixM8n8X4TransOp,
 };
 use pliron::basic_block::BasicBlock;
 use pliron::builtin::attributes::IntegerAttr;
@@ -292,6 +292,132 @@ pub fn emit_stmatrix_m8n8_x2_trans(
             loc.clone(),
             TranslationErr::unsupported(
                 "stmatrix_m8n8_x2_trans call without target block".to_string()
+            )
+        )
+    }
+}
+
+/// Emit stmatrix.m8n8.x1: Warp-cooperative matrix store (1 tile, row-major).
+///
+/// Args: (smem_ptr: *mut u32, r0: u32)
+/// Returns: void
+pub fn emit_stmatrix_m8n8_x1(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    if args.len() != 2 {
+        return input_err!(
+            loc.clone(),
+            TranslationErr::unsupported(format!(
+                "stmatrix_m8n8_x1 expects 2 arguments (smem_ptr, r0), got {}",
+                args.len()
+            ))
+        );
+    }
+
+    let mut last_op = prev_op;
+    let mut operands = Vec::with_capacity(2);
+
+    for arg in args.iter().take(2) {
+        let (val, last_op_after) =
+            rvalue::translate_operand(ctx, body, arg, value_map, block_ptr, last_op, loc.clone())?;
+        last_op = last_op_after;
+        operands.push(val);
+    }
+
+    let st_op = Operation::new(
+        ctx,
+        StmatrixM8n8X1Op::get_concrete_op_info(),
+        vec![],
+        operands,
+        vec![],
+        0,
+    );
+    st_op.deref_mut(ctx).set_loc(loc.clone());
+
+    if let Some(prev) = last_op {
+        st_op.insert_after(ctx, prev);
+    } else {
+        st_op.insert_at_front(block_ptr, ctx);
+    }
+
+    if let Some(target_idx) = target {
+        let goto_op = emit_goto(ctx, *target_idx, st_op, block_map, loc);
+        Ok(goto_op)
+    } else {
+        input_err!(
+            loc.clone(),
+            TranslationErr::unsupported("stmatrix_m8n8_x1 call without target block".to_string())
+        )
+    }
+}
+
+/// Emit stmatrix.m8n8.x1.trans: Warp-cooperative matrix store (1 tile, column-major).
+///
+/// Args: (smem_ptr: *mut u32, r0: u32)
+/// Returns: void
+pub fn emit_stmatrix_m8n8_x1_trans(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    if args.len() != 2 {
+        return input_err!(
+            loc.clone(),
+            TranslationErr::unsupported(format!(
+                "stmatrix_m8n8_x1_trans expects 2 arguments (smem_ptr, r0), got {}",
+                args.len()
+            ))
+        );
+    }
+
+    let mut last_op = prev_op;
+    let mut operands = Vec::with_capacity(2);
+
+    for arg in args.iter().take(2) {
+        let (val, last_op_after) =
+            rvalue::translate_operand(ctx, body, arg, value_map, block_ptr, last_op, loc.clone())?;
+        last_op = last_op_after;
+        operands.push(val);
+    }
+
+    let st_op = Operation::new(
+        ctx,
+        StmatrixM8n8X1TransOp::get_concrete_op_info(),
+        vec![],
+        operands,
+        vec![],
+        0,
+    );
+    st_op.deref_mut(ctx).set_loc(loc.clone());
+
+    if let Some(prev) = last_op {
+        st_op.insert_after(ctx, prev);
+    } else {
+        st_op.insert_at_front(block_ptr, ctx);
+    }
+
+    if let Some(target_idx) = target {
+        let goto_op = emit_goto(ctx, *target_idx, st_op, block_map, loc);
+        Ok(goto_op)
+    } else {
+        input_err!(
+            loc.clone(),
+            TranslationErr::unsupported(
+                "stmatrix_m8n8_x1_trans call without target block".to_string()
             )
         )
     }

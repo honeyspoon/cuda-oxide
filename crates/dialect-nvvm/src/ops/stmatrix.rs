@@ -22,6 +22,8 @@
 //! │ StmatrixM8n8X4Trans │ 4     │ 256      │ Yes       │ stmatrix...x4.trans│
 //! │ StmatrixM8n8X2Op    │ 2     │ 128      │ No        │ stmatrix...m8n8.x2 │
 //! │ StmatrixM8n8X2Trans │ 2     │ 128      │ Yes       │ stmatrix...x2.trans│
+//! │ StmatrixM8n8X1Op    │ 1     │ 64       │ No        │ stmatrix...m8n8.x1 │
+//! │ StmatrixM8n8X1Trans │ 1     │ 64       │ Yes       │ stmatrix...x1.trans│
 //! └─────────────────────┴───────┴──────────┴───────────┴────────────────────┘
 //! ```
 //!
@@ -257,6 +259,79 @@ impl Verify for StmatrixM8n8X2TransOp {
 }
 
 // =============================================================================
+// 1-Tile Store Operations
+// =============================================================================
+
+/// Store one 8×8 matrix tile to shared memory.
+///
+/// Warp-cooperative matrix store without transpose. Stores 8 columns
+/// (1 × 8×8 tile) per call.
+///
+/// PTX: `stmatrix.sync.aligned.m8n8.x1.shared.b16 [ptr], {r0};`
+///
+/// # Operands
+///
+/// - `smem_ptr` (ptr): destination pointer in shared memory
+/// - `r0` (i32): register containing two packed b16 values
+///
+/// # Results
+///
+/// - None
+#[pliron_op(
+    name = "nvvm.stmatrix_m8n8_x1",
+    format,
+    interfaces = [NOpdsInterface<2>, NResultsInterface<0>],
+)]
+pub struct StmatrixM8n8X1Op;
+
+impl StmatrixM8n8X1Op {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        StmatrixM8n8X1Op { op }
+    }
+}
+
+impl Verify for StmatrixM8n8X1Op {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        verify_stmatrix_operands(ctx, self.get_operation(), "nvvm.stmatrix_m8n8_x1", 1)
+    }
+}
+
+/// Store one 8×8 matrix tile to shared memory with transpose.
+///
+/// The transpose form stores the matrix in column-major order.
+///
+/// PTX: `stmatrix.sync.aligned.m8n8.x1.trans.shared.b16 [ptr], {r0};`
+///
+/// # Operands
+///
+/// - `smem_ptr` (ptr): destination pointer in shared memory
+/// - `r0` (i32): register containing two packed b16 values
+///
+/// # Results
+///
+/// - None
+#[pliron_op(
+    name = "nvvm.stmatrix_m8n8_x1_trans",
+    format,
+    interfaces = [NOpdsInterface<2>, NResultsInterface<0>],
+)]
+pub struct StmatrixM8n8X1TransOp;
+
+impl StmatrixM8n8X1TransOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        StmatrixM8n8X1TransOp { op }
+    }
+}
+
+impl Verify for StmatrixM8n8X1TransOp {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        verify_stmatrix_operands(ctx, self.get_operation(), "nvvm.stmatrix_m8n8_x1_trans", 1)
+    }
+}
+
+// =============================================================================
 // Type Conversion Operations
 // =============================================================================
 
@@ -297,6 +372,9 @@ pub(super) fn register(ctx: &mut Context) {
     // 2-tile store
     StmatrixM8n8X2Op::register(ctx);
     StmatrixM8n8X2TransOp::register(ctx);
+    // 1-tile store
+    StmatrixM8n8X1Op::register(ctx);
+    StmatrixM8n8X1TransOp::register(ctx);
     // Type conversion
     CvtF32x2Bf16x2Op::register(ctx);
 }

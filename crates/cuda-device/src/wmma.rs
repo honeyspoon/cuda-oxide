@@ -443,3 +443,87 @@ pub unsafe fn mma_m16n8k32_s32_s8(c: [i32; 4], a: [u32; 4], b: [u32; 2]) -> [i32
     let _ = (c, a, b);
     unreachable!("mma_m16n8k32_s32_s8 called outside CUDA kernel context")
 }
+
+// =============================================================================
+// Shared-memory matrix stores
+// =============================================================================
+
+/// Store one 8×8 matrix tile from a register to shared memory (row-major).
+///
+/// Each lane contributes one `u32` (two packed b16 elements). The warp
+/// cooperatively writes a single 8×8 tile (8 columns, 16 bytes per row) to
+/// the address provided by lanes 0-7.
+///
+/// # PTX
+///
+/// `stmatrix.sync.aligned.m8n8.x1.shared.b16 [smem_addr], {r};`
+///
+/// # Architecture
+///
+/// Requires sm_90+ (Hopper and later) and PTX ISA 7.8+.
+///
+/// # Safety
+///
+/// - `smem_addr` must point into shared memory. Each four-lane group writes
+///   one naturally aligned 16-byte row (16-byte alignment required).
+/// - The store writes 16 bytes (one 8-column tile of b16 elements).
+/// - All 32 lanes in the warp must execute the same call (warp-synchronous).
+/// - Lanes 0-7 must each provide a valid shared-memory address.
+/// - This is a weak memory operation: `.sync` converges the warp but does
+///   not order memory. Callers must use a suitable barrier or fence before
+///   a dependent memory access.
+///
+/// # Address lanes
+///
+/// ```text
+/// x1: lanes 0..7 provide addresses (1 tile, 8 rows)
+/// ```
+///
+/// # See also
+///
+/// [`stmatrix_m8n8_x1_trans`], [`ldmatrix_x1`]
+#[inline(never)]
+pub unsafe fn stmatrix_m8n8_x1(smem_addr: *mut u32, r: u32) {
+    let _ = (smem_addr, r);
+    unreachable!("stmatrix_m8n8_x1 called outside CUDA kernel context")
+}
+
+/// Store one 8×8 matrix tile from a register to shared memory (column-major).
+///
+/// Like [`stmatrix_m8n8_x1`] but with the `.trans` modifier, which selects
+/// column-major storage layout.
+///
+/// # PTX
+///
+/// `stmatrix.sync.aligned.m8n8.x1.trans.shared.b16 [smem_addr], {r};`
+///
+/// # Architecture
+///
+/// Requires sm_90+ (Hopper and later) and PTX ISA 7.8+.
+///
+/// # Safety
+///
+/// - `smem_addr` must point into shared memory. Each four-lane group writes
+///   one naturally aligned 16-byte row (16-byte alignment required).
+/// - The store writes 16 bytes (one 8-column tile of b16 elements).
+/// - All 32 lanes in the warp must execute the same call (warp-synchronous).
+/// - Lanes 0-7 must each provide a valid shared-memory address.
+/// - This is a weak memory operation: `.sync` converges the warp but does
+///   not order memory. Callers must use a suitable barrier or fence before
+///   a dependent memory access.
+///
+/// # Address lanes
+///
+/// ```text
+/// x1: lanes 0..7 provide addresses (1 tile, 8 rows)
+/// ```
+///
+/// # See also
+///
+/// [`stmatrix_m8n8_x1`], [`ldmatrix_x1_trans`]
+#[inline(never)]
+pub unsafe fn stmatrix_m8n8_x1_trans(smem_addr: *mut u32, r: u32) {
+    let _ = (smem_addr, r);
+    unreachable!("stmatrix_m8n8_x1_trans called outside CUDA kernel context")
+}
+

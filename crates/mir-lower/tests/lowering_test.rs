@@ -2911,6 +2911,14 @@ fn test_stmatrix_forms_lower_to_exact_convergent_memory_asm() -> Result<(), anyh
             nvvm::StmatrixM8n8X2TransOp::get_concrete_op_info(),
             args[..3].to_vec(),
         ),
+        (
+            nvvm::StmatrixM8n8X1Op::get_concrete_op_info(),
+            args[..2].to_vec(),
+        ),
+        (
+            nvvm::StmatrixM8n8X1TransOp::get_concrete_op_info(),
+            args[..2].to_vec(),
+        ),
     ] {
         Operation::new(&mut ctx, op_info, vec![], operands, vec![], 0).insert_at_back(entry, &ctx);
     }
@@ -2935,6 +2943,14 @@ fn test_stmatrix_forms_lower_to_exact_convergent_memory_asm() -> Result<(), anyh
         (
             "stmatrix.sync.aligned.m8n8.x2.trans.shared.b16 [%ptr32], {$1, $2};",
             "l,r,r,~{memory}",
+        ),
+        (
+            "stmatrix.sync.aligned.m8n8.x1.shared.b16 [%ptr32], {$1};",
+            "l,r,~{memory}",
+        ),
+        (
+            "stmatrix.sync.aligned.m8n8.x1.trans.shared.b16 [%ptr32], {$1};",
+            "l,r,~{memory}",
         ),
     ];
     let module_region = module_ptr.deref(&ctx).get_region(0);

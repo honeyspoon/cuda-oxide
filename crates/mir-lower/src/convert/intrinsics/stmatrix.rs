@@ -13,6 +13,8 @@
 //! | `M8n8X4Trans` | `stmatrix.sync.aligned.m8n8.x4.trans.shared.b16`| Store 4 transposed  |
 //! | `M8n8X2`      | `stmatrix.sync.aligned.m8n8.x2.shared.b16`      | Store 2 8x8 matrices|
 //! | `M8n8X2Trans` | `stmatrix.sync.aligned.m8n8.x2.trans.shared.b16`| Store 2 transposed  |
+//! | `M8n8X1`      | `stmatrix.sync.aligned.m8n8.x1.shared.b16`      | Store 1 8x8 matrix  |
+//! | `M8n8X1Trans` | `stmatrix.sync.aligned.m8n8.x1.trans.shared.b16`| Store 1 transposed  |
 
 use crate::convert::intrinsics::common::*;
 use llvm_export::types as llvm_types;
@@ -141,6 +143,68 @@ pub(crate) fn convert_m8n8_x2_trans(
             "}"
         ),
         "l,r,r,~{memory}",
+    );
+    rewriter.erase_operation(ctx, op);
+    Ok(())
+}
+
+pub(crate) fn convert_m8n8_x1(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    let void_ty = llvm_types::VoidType::get(ctx);
+    let operands: Vec<_> = op.deref(ctx).operands().collect();
+    if operands.len() != 2 {
+        return pliron::input_err_noloc!("stmatrix.m8n8.x1 requires 2 operands");
+    }
+    inline_asm_convergent(
+        ctx,
+        rewriter,
+        void_ty.into(),
+        operands,
+        concat!(
+            "{ ",
+            ".reg .u64 %ptr64; ",
+            ".reg .u32 %ptr32; ",
+            "cvta.to.shared.u64 %ptr64, $0; ",
+            "cvt.u32.u64 %ptr32, %ptr64; ",
+            "stmatrix.sync.aligned.m8n8.x1.shared.b16 [%ptr32], {$1}; ",
+            "}"
+        ),
+        "l,r,~{memory}",
+    );
+    rewriter.erase_operation(ctx, op);
+    Ok(())
+}
+
+pub(crate) fn convert_m8n8_x1_trans(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    let void_ty = llvm_types::VoidType::get(ctx);
+    let operands: Vec<_> = op.deref(ctx).operands().collect();
+    if operands.len() != 2 {
+        return pliron::input_err_noloc!("stmatrix.m8n8.x1.trans requires 2 operands");
+    }
+    inline_asm_convergent(
+        ctx,
+        rewriter,
+        void_ty.into(),
+        operands,
+        concat!(
+            "{ ",
+            ".reg .u64 %ptr64; ",
+            ".reg .u32 %ptr32; ",
+            "cvta.to.shared.u64 %ptr64, $0; ",
+            "cvt.u32.u64 %ptr32, %ptr64; ",
+            "stmatrix.sync.aligned.m8n8.x1.trans.shared.b16 [%ptr32], {$1}; ",
+            "}"
+        ),
+        "l,r,~{memory}",
     );
     rewriter.erase_operation(ctx, op);
     Ok(())

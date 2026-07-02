@@ -4016,6 +4016,16 @@ fn try_dispatch_intrinsic(
                 ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
             )?))
         }
+        "cuda_device::wmma::stmatrix_m8n8_x1" => {
+            Ok(Some(intrinsics::memory::emit_stmatrix_m8n8_x1(
+                ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+            )?))
+        }
+        "cuda_device::wmma::stmatrix_m8n8_x1_trans" => {
+            Ok(Some(intrinsics::memory::emit_stmatrix_m8n8_x1_trans(
+                ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
+            )?))
+        }
         // =================================================================
         // Ldmatrix: warp-cooperative shared memory matrix loads
         // =================================================================
