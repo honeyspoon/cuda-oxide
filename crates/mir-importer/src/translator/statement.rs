@@ -70,12 +70,21 @@ enum SetDiscriminantLayout {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SetDiscriminantAction {
     WriteDirectTag,
+    /// Write the variant's discriminant to the synthetic device-side tag
+    /// for a niche-encoded enum (e.g. `Option<NonZeroU32>`).
+    ///
+    /// On the device, niche-encoded enums use an explicit variant-count
+    /// tag instead of the host's niche payload encoding.  The physical
+    /// write is identical to `WriteDirectTag`: store the logical
+    /// discriminant value to the tag slot.  A separate variant exists so
+    /// the classifier's intent is self-documenting; the code path that
+    /// handles `WriteNicheTag` falls through to the same store logic.
+    WriteNicheTag,
     NoOp,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SetDiscriminantLayoutError {
-    NicheEncoding,
     UninhabitedVariant,
 }
 
@@ -94,7 +103,25 @@ fn classify_set_discriminant(
         SetDiscriminantLayout::Direct | SetDiscriminantLayout::Empty => {
             Err(SetDiscriminantLayoutError::UninhabitedVariant)
         }
-        SetDiscriminantLayout::Niche => Err(SetDiscriminantLayoutError::NicheEncoding),
+        // Niche-encoded enums (e.g. `Option<NonZeroU32>`, `Option<&T>`)
+        // use a synthetic variant-count tag on the device, identical in
+        // shape to Direct enums (see `types.rs` niche arm).  Writing
+        // the discriminant is therefore a plain tag store, just like
+        // the Direct case.  The key difference from the host layout:
+        //
+        //   Host:   variant is encoded by writing a "niche value" into
+        //           the payload field (e.g. 0 for `None` of
+        //           `Option<NonZeroU32>`, null for `Option<&T>`).
+        //
+        //   Device: variant is encoded by writing the logical
+        //           discriminant index into a synthetic tag field.
+        //           mir-lower's `emit_scalar_to_niched_enum` rebuilds
+        //           the host-faithful niche representation when data
+        //           crosses the kernel boundary.
+        //
+        // Reference: rustc `compiler/rustc_codegen_ssa/src/mir/place.rs`,
+        // `PlaceCx::codegen_set_discr`.
+        SetDiscriminantLayout::Niche => Ok(SetDiscriminantAction::WriteNicheTag),
         SetDiscriminantLayout::Single { inhabited_variant }
             if inhabited_variant == target_variant =>
         {
@@ -1016,18 +1043,13 @@ pub fn translate_statement(
             };
 
             match classify_set_discriminant(layout, variant_idx, target_is_inhabited) {
-                Ok(SetDiscriminantAction::WriteDirectTag) => {}
-                Ok(SetDiscriminantAction::NoOp) => return Ok(prev_op),
-                Err(SetDiscriminantLayoutError::NicheEncoding) => {
-                    return input_err!(
-                        loc,
-                        TranslationErr::unsupported(
-                            "SetDiscriminant for niche-encoded enums is not yet supported; \
-                             changing variants requires writing the niche payload value"
-                                .to_string()
-                        )
-                    );
+                Ok(SetDiscriminantAction::WriteDirectTag)
+                | Ok(SetDiscriminantAction::WriteNicheTag) => {
+                    // Both direct-tagged and niche-encoded enums write
+                    // the logical discriminant to the device's synthetic
+                    // tag; fall through to the shared store logic below.
                 }
+                Ok(SetDiscriminantAction::NoOp) => return Ok(prev_op),
                 Err(SetDiscriminantLayoutError::UninhabitedVariant) => {
                     return input_err!(
                         loc,
@@ -1495,9 +1517,15 @@ mod tests {
             classify_set_discriminant(SetDiscriminantLayout::Direct, 2, false),
             Err(SetDiscriminantLayoutError::UninhabitedVariant)
         );
+        // Niche-encoded enums write a synthetic tag on the device,
+        // identical to Direct; the classifier returns WriteNicheTag.
         assert_eq!(
             classify_set_discriminant(SetDiscriminantLayout::Niche, 0, true),
-            Err(SetDiscriminantLayoutError::NicheEncoding)
+            Ok(SetDiscriminantAction::WriteNicheTag)
+        );
+        assert_eq!(
+            classify_set_discriminant(SetDiscriminantLayout::Niche, 1, true),
+            Ok(SetDiscriminantAction::WriteNicheTag)
         );
         assert_eq!(
             classify_set_discriminant(
