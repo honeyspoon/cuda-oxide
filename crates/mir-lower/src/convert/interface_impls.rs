@@ -62,7 +62,7 @@ use dialect_nvvm::ops::{
     MinBf16x2Op, MmaM8N8K4F64Op, MmaM16N8K8F32Tf32Op, MmaM16N8K16F32Bf16Op, MmaM16N8K16F32F16Op,
     MmaM16N8K32S32S8Op, MovmatrixTransB16Op, MulBf16x2Op, NanosleepOp, NegBf16x2Op,
     NvvmAtomAddBf16x2Op, NvvmAtomAddF16x2Op, NvvmAtomicCmpxchgOp, NvvmAtomicLoadOp,
-    NvvmAtomicRmwOp, NvvmAtomicStoreOp, PmEventOp, ReadPtxSregClock64Op, ReadPtxSregClockOp,
+    NvvmAtomicRmwOp, NvvmAtomicStoreOp, PmEventOp, PrmtOp, ReadPtxSregClock64Op, ReadPtxSregClockOp,
     ReadPtxSregClusterCtaidXOp, ReadPtxSregClusterCtaidYOp, ReadPtxSregClusterCtaidZOp,
     ReadPtxSregClusterIdxOp, ReadPtxSregClusterNctaidXOp, ReadPtxSregClusterNctaidYOp,
     ReadPtxSregClusterNctaidZOp, ReadPtxSregCtaidXOp, ReadPtxSregCtaidYOp, ReadPtxSregCtaidZOp,
@@ -3378,6 +3378,20 @@ impl MirToLlvmConversion for Dp2aU32Op {
             self.get_operation(),
             operands_info,
         )
+    }
+}
+
+// ---- NVVM byte permute op -------------------------------------------------
+
+#[op_interface_impl]
+impl MirToLlvmConversion for PrmtOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::prmt::convert_prmt(ctx, rewriter, self.get_operation(), operands_info)
     }
 }
 
