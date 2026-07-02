@@ -16,7 +16,8 @@ use dialect_mir::{
 };
 use dialect_nvvm::ops::{
     MmaM8N8K4F64Op, MmaM16N8K8F32Tf32Op, MmaM16N8K16F32Bf16Op, MmaM16N8K16F32F16Op,
-    MmaM16N8K32S32S8Op, MovmatrixTransB16Op,
+    MmaM16N8K32S32S8Op, MmaSpM16N8K16F32Tf32Op, MmaSpM16N8K32F32Bf16Op,
+    MmaSpM16N8K32F32F16Op, MmaSpM16N8K64S32S8Op, MovmatrixTransB16Op,
 };
 use pliron::basic_block::BasicBlock;
 use pliron::builtin::types::{FP32Type, FP64Type, IntegerType, Signedness};
@@ -948,4 +949,488 @@ mod tests {
             "shared fragment diagnostics must not name a different MMA operation: {message}"
         );
     }
+}
+
+// =============================================================================
+// Sparse MMA (2:4 structured sparsity)
+// =============================================================================
+
+/// Extract fragments for a sparse MMA with f32 accumulator.
+///
+/// Returns (operands, last_op) where operands are [C0..C3, A0..AN, B0, B1, meta].
+#[allow(clippy::too_many_arguments)]
+fn extract_sparse_mma_f32_operands(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    loc: Location,
+    a_count: usize,
+    intrinsic_name: &str,
+) -> TranslationResult<(Vec<Value>, Option<Ptr<Operation>>)> {
+    if args.len() != 4 {
+        return input_err!(
+            loc.clone(),
+            TranslationErr::unsupported(format!(
+                "{intrinsic_name} expects 4 arguments (acc, a, b, meta), got {}",
+                args.len()
+            ))
+        );
+    }
+
+    let f32_ty = FP32Type::get(ctx);
+    let u32_ty = IntegerType::get(ctx, 32, Signedness::Unsigned);
+
+    // C accumulator: [f32; 4]
+    let (c_array, last_op) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[0],
+        value_map,
+        block_ptr,
+        prev_op,
+        loc.clone(),
+    )?;
+    let (c_registers, last_op) = extract_array_registers(
+        ctx,
+        c_array,
+        f32_ty.into(),
+        4,
+        block_ptr,
+        last_op,
+        loc.clone(),
+        "C",
+    )?;
+
+    // A fragment: [u32; a_count]
+    let (a_array, last_op_after) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[1],
+        value_map,
+        block_ptr,
+        Some(last_op),
+        loc.clone(),
+    )?;
+    let (a_registers, last_op) = extract_array_registers(
+        ctx,
+        a_array,
+        u32_ty.into(),
+        a_count,
+        block_ptr,
+        last_op_after,
+        loc.clone(),
+        "A",
+    )?;
+
+    // B fragment: [u32; 2]
+    let (b_array, last_op_after) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[2],
+        value_map,
+        block_ptr,
+        Some(last_op),
+        loc.clone(),
+    )?;
+    let (b_registers, last_op) = extract_array_registers(
+        ctx,
+        b_array,
+        u32_ty.into(),
+        2,
+        block_ptr,
+        last_op_after,
+        loc.clone(),
+        "B",
+    )?;
+
+    // Metadata: u32 scalar
+    let (meta_val, last_op_after) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[3],
+        value_map,
+        block_ptr,
+        Some(last_op),
+        loc.clone(),
+    )?;
+
+    {
+        let meta_ty = meta_val.get_type(ctx);
+        let meta_ty_ref = meta_ty.deref(ctx);
+        let valid = meta_ty_ref
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|i| i.width() == 32);
+        if !valid {
+            return input_err!(
+                loc,
+                TranslationErr::unsupported(format!("{intrinsic_name} metadata must be u32"))
+            );
+        }
+    }
+
+    let mut operands = c_registers;
+    operands.extend(a_registers);
+    operands.extend(b_registers);
+    operands.push(meta_val);
+
+    Ok((operands, last_op_after))
+}
+
+/// Emit a sparse MMA with f32 results, constructing the dialect op and packing
+/// the 4 f32 results into a `[f32; 4]` array.
+#[allow(clippy::too_many_arguments)]
+fn emit_sparse_mma_f32_op<T: Op>(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+    a_count: usize,
+    intrinsic_name: &str,
+) -> TranslationResult<Ptr<Operation>> {
+    let (operands, last_op) = extract_sparse_mma_f32_operands(
+        ctx,
+        body,
+        args,
+        block_ptr,
+        prev_op,
+        value_map,
+        loc.clone(),
+        a_count,
+        intrinsic_name,
+    )?;
+
+    let f32_ty = FP32Type::get(ctx);
+
+    let mma_op = Operation::new(
+        ctx,
+        T::get_concrete_op_info(),
+        vec![f32_ty.into(); 4],
+        operands,
+        vec![],
+        0,
+    );
+    mma_op.deref_mut(ctx).set_loc(loc.clone());
+    if let Some(prev) = last_op {
+        mma_op.insert_after(ctx, prev);
+    } else {
+        mma_op.insert_at_front(block_ptr, ctx);
+    }
+
+    let d_registers = (0..4)
+        .map(|index| mma_op.deref(ctx).get_result(index))
+        .collect();
+    let array_ty = MirArrayType::get(ctx, f32_ty.into(), 4);
+    let d_array = Operation::new(
+        ctx,
+        MirConstructArrayOp::get_concrete_op_info(),
+        vec![array_ty.into()],
+        d_registers,
+        vec![],
+        0,
+    );
+    d_array.deref_mut(ctx).set_loc(loc.clone());
+    d_array.insert_after(ctx, mma_op);
+    let result = d_array.deref(ctx).get_result(0);
+
+    emit_store_result_and_goto(
+        ctx,
+        destination,
+        result,
+        target,
+        block_ptr,
+        d_array,
+        value_map,
+        block_map,
+        loc,
+        &format!("{intrinsic_name} call without target block"),
+    )
+}
+
+/// Emit `mma_sp_m16n8k32_f32_f16`: sparse MMA with f16 inputs.
+///
+/// Args:
+/// - `args[0]`: `[f32; 4]` C accumulator
+/// - `args[1]`: `[u32; 4]` packed sparse A (f16)
+/// - `args[2]`: `[u32; 2]` packed B (f16)
+/// - `args[3]`: `u32` sparsity metadata
+///
+/// Returns: `[f32; 4]` D accumulator.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_mma_sp_m16n8k32_f32_f16(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_sparse_mma_f32_op::<MmaSpM16N8K32F32F16Op>(
+        ctx,
+        body,
+        args,
+        destination,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        4,
+        "mma_sp_m16n8k32_f32_f16",
+    )
+}
+
+/// Emit `mma_sp_m16n8k32_f32_bf16`: sparse MMA with bf16 inputs.
+///
+/// Same layout as f16 sparse but with bf16 element types.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_mma_sp_m16n8k32_f32_bf16(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_sparse_mma_f32_op::<MmaSpM16N8K32F32Bf16Op>(
+        ctx,
+        body,
+        args,
+        destination,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        4,
+        "mma_sp_m16n8k32_f32_bf16",
+    )
+}
+
+/// Emit `mma_sp_m16n8k16_f32_tf32`: sparse MMA with tf32 inputs.
+///
+/// The A fragment is [u32; 2] instead of [u32; 4] because tf32 packs fewer
+/// elements per register.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_mma_sp_m16n8k16_f32_tf32(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_sparse_mma_f32_op::<MmaSpM16N8K16F32Tf32Op>(
+        ctx,
+        body,
+        args,
+        destination,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        2,
+        "mma_sp_m16n8k16_f32_tf32",
+    )
+}
+
+/// Emit `mma_sp_m16n8k64_s32_s8`: sparse MMA with s8 inputs.
+///
+/// Integer variant where all operands and results use i32.
+///
+/// Args:
+/// - `args[0]`: `[i32; 4]` C accumulator
+/// - `args[1]`: `[u32; 4]` packed sparse A (s8)
+/// - `args[2]`: `[u32; 2]` packed B (s8)
+/// - `args[3]`: `u32` sparsity metadata
+///
+/// Returns: `[i32; 4]` D accumulator.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_mma_sp_m16n8k64_s32_s8(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    if args.len() != 4 {
+        return input_err!(
+            loc.clone(),
+            TranslationErr::unsupported(format!(
+                "mma_sp_m16n8k64_s32_s8 expects 4 arguments (acc, a, b, meta), got {}",
+                args.len()
+            ))
+        );
+    }
+
+    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signed);
+    let u32_ty = IntegerType::get(ctx, 32, Signedness::Unsigned);
+
+    // C accumulator: [i32; 4]
+    let (c_array, last_op) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[0],
+        value_map,
+        block_ptr,
+        prev_op,
+        loc.clone(),
+    )?;
+    let (c_registers, last_op) = extract_array_registers(
+        ctx,
+        c_array,
+        i32_ty.into(),
+        4,
+        block_ptr,
+        last_op,
+        loc.clone(),
+        "C",
+    )?;
+
+    // A fragment: [u32; 4]
+    let (a_array, last_op_after) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[1],
+        value_map,
+        block_ptr,
+        Some(last_op),
+        loc.clone(),
+    )?;
+    let (a_registers, last_op) = extract_array_registers(
+        ctx,
+        a_array,
+        u32_ty.into(),
+        4,
+        block_ptr,
+        last_op_after,
+        loc.clone(),
+        "A",
+    )?;
+
+    // B fragment: [u32; 2]
+    let (b_array, last_op_after) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[2],
+        value_map,
+        block_ptr,
+        Some(last_op),
+        loc.clone(),
+    )?;
+    let (b_registers, last_op) = extract_array_registers(
+        ctx,
+        b_array,
+        u32_ty.into(),
+        2,
+        block_ptr,
+        last_op_after,
+        loc.clone(),
+        "B",
+    )?;
+
+    // Metadata: u32 scalar
+    let (meta_val, last_op_after) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[3],
+        value_map,
+        block_ptr,
+        Some(last_op),
+        loc.clone(),
+    )?;
+
+    {
+        let meta_ty = meta_val.get_type(ctx);
+        let meta_ty_ref = meta_ty.deref(ctx);
+        let valid = meta_ty_ref
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|i| i.width() == 32);
+        if !valid {
+            return input_err!(
+                loc.clone(),
+                TranslationErr::unsupported(
+                    "mma_sp_m16n8k64_s32_s8 metadata must be u32".to_string()
+                )
+            );
+        }
+    }
+
+    let mut operands = c_registers;
+    operands.extend(a_registers);
+    operands.extend(b_registers);
+    operands.push(meta_val);
+
+    let mma_op = Operation::new(
+        ctx,
+        MmaSpM16N8K64S32S8Op::get_concrete_op_info(),
+        vec![i32_ty.into(); 4],
+        operands,
+        vec![],
+        0,
+    );
+    mma_op.deref_mut(ctx).set_loc(loc.clone());
+    if let Some(prev) = last_op_after {
+        mma_op.insert_after(ctx, prev);
+    } else {
+        mma_op.insert_at_front(block_ptr, ctx);
+    }
+
+    let d_registers = (0..4)
+        .map(|index| mma_op.deref(ctx).get_result(index))
+        .collect();
+    let array_ty = MirArrayType::get(ctx, i32_ty.into(), 4);
+    let d_array = Operation::new(
+        ctx,
+        MirConstructArrayOp::get_concrete_op_info(),
+        vec![array_ty.into()],
+        d_registers,
+        vec![],
+        0,
+    );
+    d_array.deref_mut(ctx).set_loc(loc.clone());
+    d_array.insert_after(ctx, mma_op);
+    let result = d_array.deref(ctx).get_result(0);
+
+    emit_store_result_and_goto(
+        ctx,
+        destination,
+        result,
+        target,
+        block_ptr,
+        d_array,
+        value_map,
+        block_map,
+        loc,
+        "mma_sp_m16n8k64_s32_s8 call without target block",
+    )
 }

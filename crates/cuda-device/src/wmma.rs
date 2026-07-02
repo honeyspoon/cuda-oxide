@@ -443,3 +443,163 @@ pub unsafe fn mma_m16n8k32_s32_s8(c: [i32; 4], a: [u32; 4], b: [u32; 2]) -> [i32
     let _ = (c, a, b);
     unreachable!("mma_m16n8k32_s32_s8 called outside CUDA kernel context")
 }
+
+// =============================================================================
+// Sparse MMA (2:4 structured sparsity)
+// =============================================================================
+
+/// Warp MMA with 2:4 structured sparsity: D = A_sparse × B + C
+/// (m16n8k32, f32 output, f16 inputs).
+///
+/// Performs a sparse matrix multiply-add where the A matrix uses 2:4
+/// structured sparsity. In every group of 4 consecutive elements along K,
+/// exactly 2 are non-zero. The A fragment is half the size of the dense
+/// variant because only the non-zero values are stored.
+///
+/// # Operands
+///
+/// - `c`: `[f32; 4]` accumulator registers
+/// - `a`: `[u32; 4]` packed sparse A fragment (f16 non-zero values)
+/// - `b`: `[u32; 2]` packed B fragment (f16 values)
+/// - `meta`: `u32` sparsity metadata describing non-zero positions
+///
+/// The selector immediate is fixed to 0x0 (uses the first metadata half).
+///
+/// # PTX
+///
+/// ```ptx
+/// mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32
+///     {%d0, %d1, %d2, %d3},
+///     {%a0, %a1, %a2, %a3},
+///     {%b0, %b1},
+///     {%c0, %c1, %c2, %c3},
+///     %meta, 0x0;
+/// ```
+///
+/// # Safety
+///
+/// - All 32 lanes must execute the same call together.
+/// - Calling from divergent control flow is undefined behavior.
+/// - The A fragment must contain valid 2:4 sparse data matching `meta`.
+/// - Requires `sm_80+` and PTX ISA 7.0+.
+#[inline(never)]
+#[must_use]
+pub unsafe fn mma_sp_m16n8k32_f32_f16(
+    c: [f32; 4],
+    a: [u32; 4],
+    b: [u32; 2],
+    meta: u32,
+) -> [f32; 4] {
+    let _ = (c, a, b, meta);
+    unreachable!("mma_sp_m16n8k32_f32_f16 called outside CUDA kernel context")
+}
+
+/// Warp MMA with 2:4 structured sparsity: D = A_sparse × B + C
+/// (m16n8k32, f32 output, bf16 inputs).
+///
+/// Same layout as [`mma_sp_m16n8k32_f32_f16`] but with bf16 element types.
+///
+/// # PTX
+///
+/// ```ptx
+/// mma.sp.sync.aligned.m16n8k32.row.col.f32.bf16.bf16.f32
+///     {%d0, %d1, %d2, %d3},
+///     {%a0, %a1, %a2, %a3},
+///     {%b0, %b1},
+///     {%c0, %c1, %c2, %c3},
+///     %meta, 0x0;
+/// ```
+///
+/// # Safety
+///
+/// - All 32 lanes must execute the same call together.
+/// - Calling from divergent control flow is undefined behavior.
+/// - The A fragment must contain valid 2:4 sparse data matching `meta`.
+/// - Requires `sm_80+` and PTX ISA 7.0+.
+#[inline(never)]
+#[must_use]
+pub unsafe fn mma_sp_m16n8k32_f32_bf16(
+    c: [f32; 4],
+    a: [u32; 4],
+    b: [u32; 2],
+    meta: u32,
+) -> [f32; 4] {
+    let _ = (c, a, b, meta);
+    unreachable!("mma_sp_m16n8k32_f32_bf16 called outside CUDA kernel context")
+}
+
+/// Warp MMA with 2:4 structured sparsity: D = A_sparse × B + C
+/// (m16n8k16, f32 output, tf32 inputs).
+///
+/// The tf32 sparse variant has a smaller A fragment (2 registers instead of 4)
+/// because tf32 packs fewer elements per register.
+///
+/// # Operands
+///
+/// - `c`: `[f32; 4]` accumulator registers
+/// - `a`: `[u32; 2]` packed sparse A fragment (tf32 non-zero values)
+/// - `b`: `[u32; 2]` packed B fragment (tf32 values)
+/// - `meta`: `u32` sparsity metadata
+///
+/// # PTX
+///
+/// ```ptx
+/// mma.sp.sync.aligned.m16n8k16.row.col.f32.tf32.tf32.f32
+///     {%d0, %d1, %d2, %d3},
+///     {%a0, %a1},
+///     {%b0, %b1},
+///     {%c0, %c1, %c2, %c3},
+///     %meta, 0x0;
+/// ```
+///
+/// # Safety
+///
+/// - All 32 lanes must execute the same call together.
+/// - Calling from divergent control flow is undefined behavior.
+/// - Requires `sm_80+` and PTX ISA 7.0+.
+#[inline(never)]
+#[must_use]
+pub unsafe fn mma_sp_m16n8k16_f32_tf32(
+    c: [f32; 4],
+    a: [u32; 2],
+    b: [u32; 2],
+    meta: u32,
+) -> [f32; 4] {
+    let _ = (c, a, b, meta);
+    unreachable!("mma_sp_m16n8k16_f32_tf32 called outside CUDA kernel context")
+}
+
+/// Warp MMA with 2:4 structured sparsity: D = A_sparse × B + C
+/// (m16n8k64, s32 output, s8 inputs).
+///
+/// Integer variant of sparse MMA. All operands and results use i32 registers.
+///
+/// # Operands
+///
+/// - `c`: `[i32; 4]` accumulator registers
+/// - `a`: `[u32; 4]` packed sparse A fragment (s8 non-zero values)
+/// - `b`: `[u32; 2]` packed B fragment (s8 values)
+/// - `meta`: `u32` sparsity metadata
+///
+/// # PTX
+///
+/// ```ptx
+/// mma.sp.sync.aligned.m16n8k64.row.col.s32.s8.s8.s32
+///     {%d0, %d1, %d2, %d3},
+///     {%a0, %a1, %a2, %a3},
+///     {%b0, %b1},
+///     {%c0, %c1, %c2, %c3},
+///     %meta, 0x0;
+/// ```
+///
+/// # Safety
+///
+/// - All 32 lanes must execute the same call together.
+/// - Calling from divergent control flow is undefined behavior.
+/// - Requires `sm_80+` and PTX ISA 7.0+.
+#[inline(never)]
+#[must_use]
+pub unsafe fn mma_sp_m16n8k64_s32_s8(c: [i32; 4], a: [u32; 4], b: [u32; 2], meta: u32) -> [i32; 4] {
+    let _ = (c, a, b, meta);
+    unreachable!("mma_sp_m16n8k64_s32_s8 called outside CUDA kernel context")
+}

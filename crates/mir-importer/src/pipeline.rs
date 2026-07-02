@@ -1290,6 +1290,20 @@ fn contains_mma_m16n8k16_f32_f16_features(contents: &str) -> bool {
     contains_instruction_mnemonic(
         contents,
         "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32",
+/// Checks for sparse MMA (mma.sp.sync) instructions (PTX 7.0, sm_80+).
+fn contains_sparse_mma_features(contents: &str) -> bool {
+    contains_instruction_mnemonic(
+        contents,
+        "mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32",
+    ) || contains_instruction_mnemonic(
+        contents,
+        "mma.sp.sync.aligned.m16n8k32.row.col.f32.bf16.bf16.f32",
+    ) || contains_instruction_mnemonic(
+        contents,
+        "mma.sp.sync.aligned.m16n8k16.row.col.f32.tf32.tf32.f32",
+    ) || contains_instruction_mnemonic(
+        contents,
+        "mma.sp.sync.aligned.m16n8k64.row.col.s32.s8.s8.s32",
     )
 }
 
@@ -1385,6 +1399,7 @@ fn contains_sm80_features(contents: &str) -> bool {
         || contains_mma_m16n8k16_f32_f16_features(contents)
         || contains_mma_m16n8k8_f32_tf32_features(contents)
         || contains_mma_m16n8k32_s32_s8_features(contents)
+        || contains_sparse_mma_features(contents)
 }
 
 /// Checks for TMA/mbarrier instructions (Hopper+ compatible with Blackwell).
@@ -1822,6 +1837,7 @@ fn detect_module_requirements_in_llvm_text(contents: &str) -> ModuleRequirements
         || contains_mma_m16n8k16_f32_f16_features(contents)
         || contains_mma_m16n8k8_f32_tf32_features(contents)
         || contains_mma_m16n8k32_s32_s8_features(contents)
+        || contains_sparse_mma_features(contents)
         || contains_mma_m8n8k4_f64_features(contents)
     {
         ptx_isa = ptx_isa.max(PtxIsaRequirement::Ptx70);

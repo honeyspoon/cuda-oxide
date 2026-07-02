@@ -490,4 +490,373 @@ pub(super) fn register(ctx: &mut Context) {
     MmaM16N8K8F32Tf32Op::register(ctx);
     MmaM16N8K32S32S8Op::register(ctx);
     MmaM8N8K4F64Op::register(ctx);
+    MmaSpM16N8K32F32F16Op::register(ctx);
+    MmaSpM16N8K32F32Bf16Op::register(ctx);
+    MmaSpM16N8K16F32Tf32Op::register(ctx);
+    MmaSpM16N8K64S32S8Op::register(ctx);
+}
+
+// =============================================================================
+// Sparse MMA (2:4 structured sparsity)
+// =============================================================================
+
+/// Sparse MMA: m16n8k32 with f32 accumulator and f16 inputs (2:4 sparsity).
+///
+/// # Operands
+///
+/// - operands 0-3: four f32 C accumulator registers
+/// - operands 4-7: four i32 A fragment registers (packed sparse f16)
+/// - operands 8-9: two i32 B fragment registers (packed f16)
+/// - operand 10: one i32 sparsity metadata register
+///
+/// # Results
+///
+/// - results 0-3: four f32 D accumulator registers
+#[pliron_op(
+    name = "nvvm.mma_sp_m16n8k32_f32_f16",
+    format,
+    interfaces = [NOpdsInterface<11>, NResultsInterface<4>],
+)]
+pub struct MmaSpM16N8K32F32F16Op;
+
+impl Verify for MmaSpM16N8K32F32F16Op {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        let op = self.get_operation().deref(ctx);
+        let operands: Vec<_> = op.operands().collect();
+
+        if operands.len() != 11 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.mma_sp_m16n8k32_f32_f16 requires 11 operands, got {}",
+                operands.len()
+            );
+        }
+
+        for (index, operand) in operands.iter().take(4).enumerate() {
+            let ty = operand.get_type(ctx);
+            if ty.deref(ctx).downcast_ref::<FP32Type>().is_none() {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mma_sp_m16n8k32_f32_f16 C operand {} must be f32",
+                    index
+                );
+            }
+        }
+
+        for (index, operand) in operands.iter().enumerate().skip(4) {
+            let ty = operand.get_type(ctx);
+            let ty = ty.deref(ctx);
+            let Some(integer) = ty.downcast_ref::<IntegerType>() else {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mma_sp_m16n8k32_f32_f16 packed operand {} must be i32",
+                    index
+                );
+            };
+            if integer.width() != 32 {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mma_sp_m16n8k32_f32_f16 packed operand {} must be i32",
+                    index
+                );
+            }
+        }
+
+        if op.get_num_results() != 4 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.mma_sp_m16n8k32_f32_f16 requires 4 f32 results"
+            );
+        }
+
+        for index in 0..4 {
+            let ty = op.get_result(index).get_type(ctx);
+            if ty.deref(ctx).downcast_ref::<FP32Type>().is_none() {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mma_sp_m16n8k32_f32_f16 result {} must be f32",
+                    index
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl MmaSpM16N8K32F32F16Op {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaSpM16N8K32F32F16Op { op }
+    }
+}
+
+/// Sparse MMA: m16n8k32 with f32 accumulator and bf16 inputs (2:4 sparsity).
+///
+/// # Operands
+///
+/// - operands 0-3: four f32 C accumulator registers
+/// - operands 4-7: four i32 A fragment registers (packed sparse bf16)
+/// - operands 8-9: two i32 B fragment registers (packed bf16)
+/// - operand 10: one i32 sparsity metadata register
+///
+/// # Results
+///
+/// - results 0-3: four f32 D accumulator registers
+#[pliron_op(
+    name = "nvvm.mma_sp_m16n8k32_f32_bf16",
+    format,
+    interfaces = [NOpdsInterface<11>, NResultsInterface<4>],
+)]
+pub struct MmaSpM16N8K32F32Bf16Op;
+
+impl Verify for MmaSpM16N8K32F32Bf16Op {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        let op = self.get_operation().deref(ctx);
+        let operands: Vec<_> = op.operands().collect();
+
+        if operands.len() != 11 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.mma_sp_m16n8k32_f32_bf16 requires 11 operands, got {}",
+                operands.len()
+            );
+        }
+
+        for (index, operand) in operands.iter().take(4).enumerate() {
+            let ty = operand.get_type(ctx);
+            if ty.deref(ctx).downcast_ref::<FP32Type>().is_none() {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mma_sp_m16n8k32_f32_bf16 C operand {} must be f32",
+                    index
+                );
+            }
+        }
+
+        for (index, operand) in operands.iter().enumerate().skip(4) {
+            let ty = operand.get_type(ctx);
+            let ty = ty.deref(ctx);
+            let Some(integer) = ty.downcast_ref::<IntegerType>() else {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mma_sp_m16n8k32_f32_bf16 packed operand {} must be i32",
+                    index
+                );
+            };
+            if integer.width() != 32 {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mma_sp_m16n8k32_f32_bf16 packed operand {} must be i32",
+                    index
+                );
+            }
+        }
+
+        if op.get_num_results() != 4 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.mma_sp_m16n8k32_f32_bf16 requires 4 f32 results"
+            );
+        }
+
+        for index in 0..4 {
+            let ty = op.get_result(index).get_type(ctx);
+            if ty.deref(ctx).downcast_ref::<FP32Type>().is_none() {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mma_sp_m16n8k32_f32_bf16 result {} must be f32",
+                    index
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl MmaSpM16N8K32F32Bf16Op {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaSpM16N8K32F32Bf16Op { op }
+    }
+}
+
+/// Sparse MMA: m16n8k16 with f32 accumulator and tf32 inputs (2:4 sparsity).
+///
+/// # Operands
+///
+/// - operands 0-3: four f32 C accumulator registers
+/// - operands 4-5: two i32 A fragment registers (packed sparse tf32)
+/// - operands 6-7: two i32 B fragment registers (packed tf32)
+/// - operand 8: one i32 sparsity metadata register
+///
+/// # Results
+///
+/// - results 0-3: four f32 D accumulator registers
+#[pliron_op(
+    name = "nvvm.mma_sp_m16n8k16_f32_tf32",
+    format,
+    interfaces = [NOpdsInterface<9>, NResultsInterface<4>],
+)]
+pub struct MmaSpM16N8K16F32Tf32Op;
+
+impl Verify for MmaSpM16N8K16F32Tf32Op {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        let op = self.get_operation().deref(ctx);
+        let operands: Vec<_> = op.operands().collect();
+
+        if operands.len() != 9 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.mma_sp_m16n8k16_f32_tf32 requires 9 operands, got {}",
+                operands.len()
+            );
+        }
+
+        for (index, operand) in operands.iter().take(4).enumerate() {
+            let ty = operand.get_type(ctx);
+            if ty.deref(ctx).downcast_ref::<FP32Type>().is_none() {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mma_sp_m16n8k16_f32_tf32 C operand {} must be f32",
+                    index
+                );
+            }
+        }
+
+        for (index, operand) in operands.iter().enumerate().skip(4) {
+            let ty = operand.get_type(ctx);
+            let ty = ty.deref(ctx);
+            let Some(integer) = ty.downcast_ref::<IntegerType>() else {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mma_sp_m16n8k16_f32_tf32 packed operand {} must be i32",
+                    index
+                );
+            };
+            if integer.width() != 32 {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mma_sp_m16n8k16_f32_tf32 packed operand {} must be i32",
+                    index
+                );
+            }
+        }
+
+        if op.get_num_results() != 4 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.mma_sp_m16n8k16_f32_tf32 requires 4 f32 results"
+            );
+        }
+
+        for index in 0..4 {
+            let ty = op.get_result(index).get_type(ctx);
+            if ty.deref(ctx).downcast_ref::<FP32Type>().is_none() {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mma_sp_m16n8k16_f32_tf32 result {} must be f32",
+                    index
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl MmaSpM16N8K16F32Tf32Op {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaSpM16N8K16F32Tf32Op { op }
+    }
+}
+
+/// Sparse MMA: m16n8k64 with s32 accumulator and s8 inputs (2:4 sparsity).
+///
+/// # Operands
+///
+/// - operands 0-3: four i32 C accumulator registers
+/// - operands 4-7: four i32 A fragment registers (packed sparse s8)
+/// - operands 8-9: two i32 B fragment registers (packed s8)
+/// - operand 10: one i32 sparsity metadata register
+///
+/// # Results
+///
+/// - results 0-3: four i32 D accumulator registers
+#[pliron_op(
+    name = "nvvm.mma_sp_m16n8k64_s32_s8",
+    format,
+    interfaces = [NOpdsInterface<11>, NResultsInterface<4>],
+)]
+pub struct MmaSpM16N8K64S32S8Op;
+
+impl Verify for MmaSpM16N8K64S32S8Op {
+    fn verify(&self, ctx: &Context) -> Result<(), Error> {
+        let op = self.get_operation().deref(ctx);
+        let operands: Vec<_> = op.operands().collect();
+
+        if operands.len() != 11 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.mma_sp_m16n8k64_s32_s8 requires 11 operands, got {}",
+                operands.len()
+            );
+        }
+
+        for (index, operand) in operands.iter().enumerate() {
+            let ty = operand.get_type(ctx);
+            let ty = ty.deref(ctx);
+            let Some(integer) = ty.downcast_ref::<IntegerType>() else {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mma_sp_m16n8k64_s32_s8 operand {} must be i32",
+                    index
+                );
+            };
+            if integer.width() != 32 {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mma_sp_m16n8k64_s32_s8 operand {} must be i32",
+                    index
+                );
+            }
+        }
+
+        if op.get_num_results() != 4 {
+            return verify_err!(
+                op.loc(),
+                "nvvm.mma_sp_m16n8k64_s32_s8 requires 4 i32 results"
+            );
+        }
+
+        for index in 0..4 {
+            let ty = op.get_result(index).get_type(ctx);
+            let ty = ty.deref(ctx);
+            let Some(integer) = ty.downcast_ref::<IntegerType>() else {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mma_sp_m16n8k64_s32_s8 result {} must be i32",
+                    index
+                );
+            };
+            if integer.width() != 32 {
+                return verify_err!(
+                    op.loc(),
+                    "nvvm.mma_sp_m16n8k64_s32_s8 result {} must be i32",
+                    index
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl MmaSpM16N8K64S32S8Op {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        MmaSpM16N8K64S32S8Op { op }
+    }
 }
