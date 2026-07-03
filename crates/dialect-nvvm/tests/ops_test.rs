@@ -5,7 +5,8 @@
 
 use dialect_mir::types::MirPtrType;
 use dialect_nvvm::ops::{
-    Barrier0Op, ElectSyncOp, FmaBf16x2Op, LdmatrixX2Op, MmaM8N8K4F64Op, MmaM16N8K16F32Bf16Op,
+    Barrier0Op, ElectSyncOp, FmaBf16x2Op, LdmatrixX2Op, MmaM8N8K4F64Op, MmaM16N8K4F32Tf32Op,
+    MmaM16N8K4F64Op, MmaM16N8K8F32Bf16Op, MmaM16N8K16F16F16Op, MmaM16N8K16F32Bf16Op,
     MovmatrixTransB16Op, NvvmAtomAddBf16x2Op, NvvmAtomAddF16x2Op, ReadPtxSregDynamicSmemSizeOp,
     ReadPtxSregGridIdOp, ReadPtxSregLaneIdOp, ReadPtxSregLanemaskEqOp, ReadPtxSregLanemaskGeOp,
     ReadPtxSregLanemaskGtOp, ReadPtxSregLanemaskLeOp, ReadPtxSregLanemaskLtOp, ReadPtxSregNsmIdOp,
@@ -889,4 +890,382 @@ fn test_shfl_sync_i64_construct_and_verify() {
         );
         assert!(verify_op(&ShflSyncIdxI64Op::new(bad), &ctx).is_err());
     }
+}
+
+#[test]
+fn test_mma_m16n8k8_bf16_verifies_exact_register_signature() {
+    let mut ctx = Context::new();
+    dialect_nvvm::register(&mut ctx);
+
+    let f32_ty = FP32Type::get(&ctx);
+    let i32_ty = IntegerType::get(&ctx, 32, Signedness::Signless);
+    let i64_ty = IntegerType::get(&ctx, 64, Signedness::Signless);
+    let block = BasicBlock::new(
+        &mut ctx,
+        None,
+        vec![f32_ty.into(), i32_ty.into(), i64_ty.into()],
+    );
+    let f32_value = block.deref(&ctx).get_argument(0);
+    let i32_value = block.deref(&ctx).get_argument(1);
+    let i64_value = block.deref(&ctx).get_argument(2);
+
+    // Valid: 4 f32 C + 3 i32 packed = 7 operands, 4 f32 results.
+    let operands = || {
+        (0..4)
+            .map(|_| f32_value)
+            .chain((0..3).map(|_| i32_value))
+            .collect()
+    };
+    let valid = Operation::new(
+        &mut ctx,
+        MmaM16N8K8F32Bf16Op::get_concrete_op_info(),
+        vec![f32_ty.into(); 4],
+        operands(),
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K8F32Bf16Op::new(valid), &ctx).is_ok());
+
+    // Bad C-accumulator: i32 instead of f32 at position 0.
+    let bad_c_operands = (0..4)
+        .map(|index| if index == 0 { i32_value } else { f32_value })
+        .chain((0..3).map(|_| i32_value))
+        .collect();
+    let bad_c = Operation::new(
+        &mut ctx,
+        MmaM16N8K8F32Bf16Op::get_concrete_op_info(),
+        vec![f32_ty.into(); 4],
+        bad_c_operands,
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K8F32Bf16Op::new(bad_c), &ctx).is_err());
+
+    // Bad packed-register: i64 instead of i32 at packed position 0.
+    let bad_packed_operands = (0..4)
+        .map(|_| f32_value)
+        .chain((0..3).map(|index| if index == 0 { i64_value } else { i32_value }))
+        .collect();
+    let bad_packed = Operation::new(
+        &mut ctx,
+        MmaM16N8K8F32Bf16Op::get_concrete_op_info(),
+        vec![f32_ty.into(); 4],
+        bad_packed_operands,
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K8F32Bf16Op::new(bad_packed), &ctx).is_err());
+
+    // Bad result type: one i32 among f32 results.
+    let bad_result = Operation::new(
+        &mut ctx,
+        MmaM16N8K8F32Bf16Op::get_concrete_op_info(),
+        vec![f32_ty.into(), f32_ty.into(), f32_ty.into(), i32_ty.into()],
+        operands(),
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K8F32Bf16Op::new(bad_result), &ctx).is_err());
+
+    // Bad operand arity: 6 instead of 7.
+    let bad_operand_arity = Operation::new(
+        &mut ctx,
+        MmaM16N8K8F32Bf16Op::get_concrete_op_info(),
+        vec![f32_ty.into(); 4],
+        (0..4)
+            .map(|_| f32_value)
+            .chain((0..2).map(|_| i32_value))
+            .collect(),
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K8F32Bf16Op::new(bad_operand_arity), &ctx).is_err());
+
+    // Bad result arity: 3 instead of 4.
+    let bad_result_arity = Operation::new(
+        &mut ctx,
+        MmaM16N8K8F32Bf16Op::get_concrete_op_info(),
+        vec![f32_ty.into(); 3],
+        operands(),
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K8F32Bf16Op::new(bad_result_arity), &ctx).is_err());
+}
+
+#[test]
+fn test_mma_m16n8k4_tf32_verifies_exact_register_signature() {
+    let mut ctx = Context::new();
+    dialect_nvvm::register(&mut ctx);
+
+    let f32_ty = FP32Type::get(&ctx);
+    let i32_ty = IntegerType::get(&ctx, 32, Signedness::Signless);
+    let i64_ty = IntegerType::get(&ctx, 64, Signedness::Signless);
+    let block = BasicBlock::new(
+        &mut ctx,
+        None,
+        vec![f32_ty.into(), i32_ty.into(), i64_ty.into()],
+    );
+    let f32_value = block.deref(&ctx).get_argument(0);
+    let i32_value = block.deref(&ctx).get_argument(1);
+    let i64_value = block.deref(&ctx).get_argument(2);
+
+    // Valid: 4 f32 C + 3 i32 packed = 7 operands, 4 f32 results.
+    let operands = || {
+        (0..4)
+            .map(|_| f32_value)
+            .chain((0..3).map(|_| i32_value))
+            .collect()
+    };
+    let valid = Operation::new(
+        &mut ctx,
+        MmaM16N8K4F32Tf32Op::get_concrete_op_info(),
+        vec![f32_ty.into(); 4],
+        operands(),
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K4F32Tf32Op::new(valid), &ctx).is_ok());
+
+    // Bad C-accumulator: i32 instead of f32 at position 0.
+    let bad_c_operands = (0..4)
+        .map(|index| if index == 0 { i32_value } else { f32_value })
+        .chain((0..3).map(|_| i32_value))
+        .collect();
+    let bad_c = Operation::new(
+        &mut ctx,
+        MmaM16N8K4F32Tf32Op::get_concrete_op_info(),
+        vec![f32_ty.into(); 4],
+        bad_c_operands,
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K4F32Tf32Op::new(bad_c), &ctx).is_err());
+
+    // Bad packed-register: i64 instead of i32 at packed position 0.
+    let bad_packed_operands = (0..4)
+        .map(|_| f32_value)
+        .chain((0..3).map(|index| if index == 0 { i64_value } else { i32_value }))
+        .collect();
+    let bad_packed = Operation::new(
+        &mut ctx,
+        MmaM16N8K4F32Tf32Op::get_concrete_op_info(),
+        vec![f32_ty.into(); 4],
+        bad_packed_operands,
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K4F32Tf32Op::new(bad_packed), &ctx).is_err());
+
+    // Bad result type: one i32 among f32 results.
+    let bad_result = Operation::new(
+        &mut ctx,
+        MmaM16N8K4F32Tf32Op::get_concrete_op_info(),
+        vec![f32_ty.into(), f32_ty.into(), f32_ty.into(), i32_ty.into()],
+        operands(),
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K4F32Tf32Op::new(bad_result), &ctx).is_err());
+
+    // Bad operand arity: 6 instead of 7.
+    let bad_operand_arity = Operation::new(
+        &mut ctx,
+        MmaM16N8K4F32Tf32Op::get_concrete_op_info(),
+        vec![f32_ty.into(); 4],
+        (0..4)
+            .map(|_| f32_value)
+            .chain((0..2).map(|_| i32_value))
+            .collect(),
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K4F32Tf32Op::new(bad_operand_arity), &ctx).is_err());
+
+    // Bad result arity: 3 instead of 4.
+    let bad_result_arity = Operation::new(
+        &mut ctx,
+        MmaM16N8K4F32Tf32Op::get_concrete_op_info(),
+        vec![f32_ty.into(); 3],
+        operands(),
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K4F32Tf32Op::new(bad_result_arity), &ctx).is_err());
+}
+
+#[test]
+fn test_mma_m16n8k4_f64_verifies_exact_register_signature() {
+    let mut ctx = Context::new();
+    dialect_nvvm::register(&mut ctx);
+
+    let f64_ty = FP64Type::get(&ctx);
+    let f32_ty = FP32Type::get(&ctx);
+    let block = BasicBlock::new(&mut ctx, None, vec![f64_ty.into(), f32_ty.into()]);
+    let f64_value = block.deref(&ctx).get_argument(0);
+    let f32_value = block.deref(&ctx).get_argument(1);
+
+    // Valid: 7 f64 operands, 4 f64 results.
+    let operands = || (0..7).map(|_| f64_value).collect();
+    let valid = Operation::new(
+        &mut ctx,
+        MmaM16N8K4F64Op::get_concrete_op_info(),
+        vec![f64_ty.into(); 4],
+        operands(),
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K4F64Op::new(valid), &ctx).is_ok());
+
+    // Bad C-accumulator: f32 instead of f64 at position 0.
+    let bad_c_operands: Vec<_> = (0..7)
+        .map(|index| if index == 0 { f32_value } else { f64_value })
+        .collect();
+    let bad_c = Operation::new(
+        &mut ctx,
+        MmaM16N8K4F64Op::get_concrete_op_info(),
+        vec![f64_ty.into(); 4],
+        bad_c_operands,
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K4F64Op::new(bad_c), &ctx).is_err());
+
+    // Bad A/B fragment: f32 instead of f64 at position 5.
+    let bad_fragment_operands: Vec<_> = (0..7)
+        .map(|index| if index == 5 { f32_value } else { f64_value })
+        .collect();
+    let bad_fragment = Operation::new(
+        &mut ctx,
+        MmaM16N8K4F64Op::get_concrete_op_info(),
+        vec![f64_ty.into(); 4],
+        bad_fragment_operands,
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K4F64Op::new(bad_fragment), &ctx).is_err());
+
+    // Bad result type: one f32 among f64 results.
+    let bad_result = Operation::new(
+        &mut ctx,
+        MmaM16N8K4F64Op::get_concrete_op_info(),
+        vec![f64_ty.into(), f64_ty.into(), f64_ty.into(), f32_ty.into()],
+        operands(),
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K4F64Op::new(bad_result), &ctx).is_err());
+
+    // Bad operand arity: 6 instead of 7.
+    let bad_operand_arity = Operation::new(
+        &mut ctx,
+        MmaM16N8K4F64Op::get_concrete_op_info(),
+        vec![f64_ty.into(); 4],
+        (0..6).map(|_| f64_value).collect(),
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K4F64Op::new(bad_operand_arity), &ctx).is_err());
+
+    // Bad result arity: 3 instead of 4.
+    let bad_result_arity = Operation::new(
+        &mut ctx,
+        MmaM16N8K4F64Op::get_concrete_op_info(),
+        vec![f64_ty.into(); 3],
+        operands(),
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K4F64Op::new(bad_result_arity), &ctx).is_err());
+}
+
+#[test]
+fn test_mma_m16n8k16_f16_f16_verifies_exact_register_signature() {
+    let mut ctx = Context::new();
+    dialect_nvvm::register(&mut ctx);
+
+    let i32_ty = IntegerType::get(&ctx, 32, Signedness::Signless);
+    let i64_ty = IntegerType::get(&ctx, 64, Signedness::Signless);
+    let f32_ty = FP32Type::get(&ctx);
+    let block = BasicBlock::new(
+        &mut ctx,
+        None,
+        vec![i32_ty.into(), i64_ty.into(), f32_ty.into()],
+    );
+    let i32_value = block.deref(&ctx).get_argument(0);
+    let i64_value = block.deref(&ctx).get_argument(1);
+    let f32_value = block.deref(&ctx).get_argument(2);
+
+    // Valid: 8 i32 operands, 2 i32 results.
+    let operands = || (0..8).map(|_| i32_value).collect();
+    let valid = Operation::new(
+        &mut ctx,
+        MmaM16N8K16F16F16Op::get_concrete_op_info(),
+        vec![i32_ty.into(); 2],
+        operands(),
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K16F16F16Op::new(valid), &ctx).is_ok());
+
+    // Bad C-accumulator: f32 instead of i32 at position 0.
+    let bad_c_operands: Vec<_> = (0..8)
+        .map(|index| if index == 0 { f32_value } else { i32_value })
+        .collect();
+    let bad_c = Operation::new(
+        &mut ctx,
+        MmaM16N8K16F16F16Op::get_concrete_op_info(),
+        vec![i32_ty.into(); 2],
+        bad_c_operands,
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K16F16F16Op::new(bad_c), &ctx).is_err());
+
+    // Bad packed-register: i64 instead of i32 at position 4.
+    let bad_packed_operands: Vec<_> = (0..8)
+        .map(|index| if index == 4 { i64_value } else { i32_value })
+        .collect();
+    let bad_packed = Operation::new(
+        &mut ctx,
+        MmaM16N8K16F16F16Op::get_concrete_op_info(),
+        vec![i32_ty.into(); 2],
+        bad_packed_operands,
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K16F16F16Op::new(bad_packed), &ctx).is_err());
+
+    // Bad result type: f32 instead of i32 in result.
+    let bad_result = Operation::new(
+        &mut ctx,
+        MmaM16N8K16F16F16Op::get_concrete_op_info(),
+        vec![i32_ty.into(), f32_ty.into()],
+        operands(),
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K16F16F16Op::new(bad_result), &ctx).is_err());
+
+    // Bad operand arity: 7 instead of 8.
+    let bad_operand_arity = Operation::new(
+        &mut ctx,
+        MmaM16N8K16F16F16Op::get_concrete_op_info(),
+        vec![i32_ty.into(); 2],
+        (0..7).map(|_| i32_value).collect(),
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K16F16F16Op::new(bad_operand_arity), &ctx).is_err());
+
+    // Bad result arity: 1 instead of 2.
+    let bad_result_arity = Operation::new(
+        &mut ctx,
+        MmaM16N8K16F16F16Op::get_concrete_op_info(),
+        vec![i32_ty.into(); 1],
+        operands(),
+        vec![],
+        0,
+    );
+    assert!(verify_op(&MmaM16N8K16F16F16Op::new(bad_result_arity), &ctx).is_err());
 }
