@@ -6,8 +6,8 @@
 use dialect_mir::types::MirPtrType;
 use dialect_nvvm::ops::{
     AbsF16x2Op, AddF16x2Op, Barrier0Op, ElectSyncOp, FmaBf16x2Op, FmaF16x2Op, FmaReluF16x2Op,
-    LdmatrixX2Op, MaxF16x2Op, MinF16x2Op, MmaM16N8K16F32Bf16Op, MmaM16N8K16F32F16Op,
-    MmaM16N8K32S32S8Op, MmaM16N8K8F32Tf32Op, MmaM8N8K4F64Op, MovmatrixTransB16Op, MulF16x2Op,
+    LdmatrixX2Op, MaxF16x2Op, MinF16x2Op, MmaM8N8K4F64Op, MmaM16N8K8F32Tf32Op,
+    MmaM16N8K16F32Bf16Op, MmaM16N8K16F32F16Op, MmaM16N8K32S32S8Op, MovmatrixTransB16Op, MulF16x2Op,
     NegF16x2Op, NvvmAtomAddBf16x2Op, NvvmAtomAddF16x2Op, ReadPtxSregDynamicSmemSizeOp,
     ReadPtxSregGridIdOp, ReadPtxSregLaneIdOp, ReadPtxSregLanemaskEqOp, ReadPtxSregLanemaskGeOp,
     ReadPtxSregLanemaskGtOp, ReadPtxSregLanemaskLeOp, ReadPtxSregLanemaskLtOp, ReadPtxSregNsmIdOp,
