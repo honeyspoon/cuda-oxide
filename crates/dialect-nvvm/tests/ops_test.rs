@@ -13,9 +13,8 @@ use dialect_nvvm::ops::{
     ReadPtxSregSmIdOp, ReadPtxSregTidXOp, ReadPtxSregTotalSmemSizeOp, ReadPtxSregWarpIdOp,
     ReduxSyncAddOp, ReduxSyncAndOp, ReduxSyncMaxOp, ReduxSyncMinOp, ReduxSyncOrOp, ReduxSyncUmaxOp,
     ReduxSyncUminOp, ReduxSyncXorOp, ShflSyncBflyI64Op, ShflSyncDownI64Op, ShflSyncIdxI64Op,
-    ShflSyncUpI64Op, StmatrixM8n8X1Op, StmatrixM8n8X1TransOp,
-    StmatrixM8n8X4Op, ThreadfenceBlockOp, ThreadfenceOp, ThreadfenceSystemOp,
-
+    ShflSyncUpI64Op, StmatrixM8n8X1Op, StmatrixM8n8X1TransOp, StmatrixM8n8X4Op, ThreadfenceBlockOp,
+    ThreadfenceOp, ThreadfenceSystemOp,
 };
 use pliron::{
     basic_block::BasicBlock,

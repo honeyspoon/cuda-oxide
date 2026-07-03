@@ -76,12 +76,12 @@ use dialect_nvvm::ops::{
     ReduxSyncAddOp, ReduxSyncAndOp, ReduxSyncMaxOp, ReduxSyncMinOp, ReduxSyncOrOp, ReduxSyncUmaxOp,
     ReduxSyncUminOp, ReduxSyncXorOp, ShflSyncBflyF32Op, ShflSyncBflyI32Op, ShflSyncBflyI64Op,
     ShflSyncDownF32Op, ShflSyncDownI32Op, ShflSyncDownI64Op, ShflSyncIdxF32Op, ShflSyncIdxI32Op,
-    ShflSyncIdxI64Op, ShflSyncUpF32Op, ShflSyncUpI32Op, ShflSyncUpI64Op, StmatrixM8n8X1Op, StmatrixM8n8X1TransOp,
-    StmatrixM8n8X2Op,
-    StmatrixM8n8X2TransOp, StmatrixM8n8X4Op, StmatrixM8n8X4TransOp, SubBf16x2Op, Tcgen05AllocCg2Op,
-    Tcgen05AllocOp, Tcgen05CommitCg2Op, Tcgen05CommitMulticastCg2Op, Tcgen05CommitOp,
-    Tcgen05CommitSharedClusterCg2Op, Tcgen05CommitSharedClusterOp, Tcgen05CpSmemToTmemCg2Op,
-    Tcgen05CpSmemToTmemOp, Tcgen05DeallocCg2Op, Tcgen05DeallocOp, Tcgen05FenceAfterThreadSyncOp,
+    ShflSyncIdxI64Op, ShflSyncUpF32Op, ShflSyncUpI32Op, ShflSyncUpI64Op, StmatrixM8n8X1Op,
+    StmatrixM8n8X1TransOp, StmatrixM8n8X2Op, StmatrixM8n8X2TransOp, StmatrixM8n8X4Op,
+    StmatrixM8n8X4TransOp, SubBf16x2Op, Tcgen05AllocCg2Op, Tcgen05AllocOp, Tcgen05CommitCg2Op,
+    Tcgen05CommitMulticastCg2Op, Tcgen05CommitOp, Tcgen05CommitSharedClusterCg2Op,
+    Tcgen05CommitSharedClusterOp, Tcgen05CpSmemToTmemCg2Op, Tcgen05CpSmemToTmemOp,
+    Tcgen05DeallocCg2Op, Tcgen05DeallocOp, Tcgen05FenceAfterThreadSyncOp,
     Tcgen05FenceBeforeThreadSyncOp, Tcgen05Ld16x256bPureOp, Tcgen05Ld16x256bX8PureOp,
     Tcgen05LoadWaitOp, Tcgen05MmaF16Cg2Op, Tcgen05MmaF16Op, Tcgen05MmaWsBf16Op, Tcgen05MmaWsF16Op,
     Tcgen05MmaWsTf32Op, Tcgen05RelinquishAllocPermitCg2Op, Tcgen05RelinquishAllocPermitOp,
@@ -89,7 +89,6 @@ use dialect_nvvm::ops::{
     VoteSyncAllOp, VoteSyncAnyOp, VoteSyncBallotOp, VprintfOp, WgmmaCommitGroupSyncAlignedOp,
     WgmmaFenceSyncAlignedOp, WgmmaMakeSmemDescOp, WgmmaMmaM64N64K16F32Bf16Op,
     WgmmaWaitGroupSyncAlignedOp,
-
 };
 
 // ---- Arithmetic ops --------------------------------------------------------

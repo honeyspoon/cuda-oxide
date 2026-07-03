@@ -520,4 +520,3 @@ pub unsafe fn stmatrix_m8n8_x1_trans(smem_addr: *mut u32, r: u32) {
     let _ = (smem_addr, r);
     unreachable!("stmatrix_m8n8_x1_trans called outside CUDA kernel context")
 }
-
