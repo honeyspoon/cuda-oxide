@@ -1260,44 +1260,145 @@ fn contains_mma_m8n8k4_f64_features(contents: &str) -> bool {
 }
 
 /// Checks for the u8 integer MMA with m16n8k32 shape (PTX 7.0, sm_80+).
+///
+/// PTX permits both wrapping and `.satfinite` accumulator-overflow behavior.
 fn contains_mma_m16n8k32_s32_u8_features(contents: &str) -> bool {
-    contains_instruction_mnemonic(contents, "mma.sync.aligned.m16n8k32.row.col.s32.u8.u8.s32")
+    [
+        "mma.sync.aligned.m16n8k32.row.col.s32.u8.u8.s32",
+        "mma.sync.aligned.m16n8k32.row.col.satfinite.s32.u8.u8.s32",
+    ]
+    .into_iter()
+    .any(|mnemonic| contains_instruction_mnemonic(contents, mnemonic))
 }
 
 /// Checks for the s8 integer MMA with m16n8k16 shape (PTX 7.0, sm_80+).
+///
+/// PTX permits both wrapping and `.satfinite` accumulator-overflow behavior.
 fn contains_mma_m16n8k16_s32_s8_features(contents: &str) -> bool {
-    contains_instruction_mnemonic(contents, "mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32")
+    [
+        "mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32",
+        "mma.sync.aligned.m16n8k16.row.col.satfinite.s32.s8.s8.s32",
+    ]
+    .into_iter()
+    .any(|mnemonic| contains_instruction_mnemonic(contents, mnemonic))
 }
 
 /// Checks for the u8 integer MMA with m16n8k16 shape (PTX 7.0, sm_80+).
+///
+/// PTX permits both wrapping and `.satfinite` accumulator-overflow behavior.
 fn contains_mma_m16n8k16_s32_u8_features(contents: &str) -> bool {
-    contains_instruction_mnemonic(contents, "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32")
+    [
+        "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32",
+        "mma.sync.aligned.m16n8k16.row.col.satfinite.s32.u8.u8.s32",
+    ]
+    .into_iter()
+    .any(|mnemonic| contains_instruction_mnemonic(contents, mnemonic))
 }
 
 /// Checks for the s4 integer MMA with m16n8k64 shape (PTX 7.0, sm_80+).
+///
+/// PTX permits both wrapping and `.satfinite` accumulator-overflow behavior.
 fn contains_mma_m16n8k64_s32_s4_features(contents: &str) -> bool {
-    contains_instruction_mnemonic(contents, "mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32")
+    [
+        "mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32",
+        "mma.sync.aligned.m16n8k64.row.col.satfinite.s32.s4.s4.s32",
+    ]
+    .into_iter()
+    .any(|mnemonic| contains_instruction_mnemonic(contents, mnemonic))
 }
 
 /// Checks for the u4 integer MMA with m16n8k64 shape (PTX 7.0, sm_80+).
+///
+/// PTX permits both wrapping and `.satfinite` accumulator-overflow behavior.
 fn contains_mma_m16n8k64_s32_u4_features(contents: &str) -> bool {
-    contains_instruction_mnemonic(contents, "mma.sync.aligned.m16n8k64.row.col.s32.u4.u4.s32")
+    [
+        "mma.sync.aligned.m16n8k64.row.col.s32.u4.u4.s32",
+        "mma.sync.aligned.m16n8k64.row.col.satfinite.s32.u4.u4.s32",
+    ]
+    .into_iter()
+    .any(|mnemonic| contains_instruction_mnemonic(contents, mnemonic))
 }
 
 /// Checks for the b1 AND.POPC MMA with m16n8k256 shape (PTX 7.0, sm_80+).
+///
+/// PTX permits both wrapping and `.satfinite` accumulator-overflow behavior.
 fn contains_mma_m16n8k256_s32_b1_and_features(contents: &str) -> bool {
-    contains_instruction_mnemonic(
-        contents,
+    [
         "mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.and.popc",
-    )
+        "mma.sync.aligned.m16n8k256.row.col.satfinite.s32.b1.b1.s32.and.popc",
+    ]
+    .into_iter()
+    .any(|mnemonic| contains_instruction_mnemonic(contents, mnemonic))
 }
 
 /// Checks for the b1 XOR.POPC MMA with m16n8k256 shape (PTX 7.0, sm_80+).
+///
+/// PTX permits both wrapping and `.satfinite` accumulator-overflow behavior.
 fn contains_mma_m16n8k256_s32_b1_xor_features(contents: &str) -> bool {
-    contains_instruction_mnemonic(
-        contents,
+    [
         "mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.xor.popc",
-    )
+        "mma.sync.aligned.m16n8k256.row.col.satfinite.s32.b1.b1.s32.xor.popc",
+    ]
+    .into_iter()
+    .any(|mnemonic| contains_instruction_mnemonic(contents, mnemonic))
+}
+
+/// Checks for mixed-signedness INT8 mma.sync with m16n8k32 s8*u8 (PTX 7.0, sm_80+).
+///
+/// PTX permits both wrapping and `.satfinite` accumulator-overflow behavior.
+fn contains_mma_m16n8k32_s32_s8_u8_features(contents: &str) -> bool {
+    [
+        "mma.sync.aligned.m16n8k32.row.col.s32.s8.u8.s32",
+        "mma.sync.aligned.m16n8k32.row.col.satfinite.s32.s8.u8.s32",
+    ]
+    .into_iter()
+    .any(|mnemonic| contains_instruction_mnemonic(contents, mnemonic))
+}
+
+/// Checks for mixed-signedness INT8 mma.sync with m16n8k32 u8*s8 (PTX 7.0, sm_80+).
+///
+/// PTX permits both wrapping and `.satfinite` accumulator-overflow behavior.
+fn contains_mma_m16n8k32_s32_u8_s8_features(contents: &str) -> bool {
+    [
+        "mma.sync.aligned.m16n8k32.row.col.s32.u8.s8.s32",
+        "mma.sync.aligned.m16n8k32.row.col.satfinite.s32.u8.s8.s32",
+    ]
+    .into_iter()
+    .any(|mnemonic| contains_instruction_mnemonic(contents, mnemonic))
+}
+
+/// Checks for mixed-signedness INT8 mma.sync with m16n8k16 s8*u8 (PTX 7.0, sm_80+).
+///
+/// PTX permits both wrapping and `.satfinite` accumulator-overflow behavior.
+fn contains_mma_m16n8k16_s32_s8_u8_features(contents: &str) -> bool {
+    [
+        "mma.sync.aligned.m16n8k16.row.col.s32.s8.u8.s32",
+        "mma.sync.aligned.m16n8k16.row.col.satfinite.s32.s8.u8.s32",
+    ]
+    .into_iter()
+    .any(|mnemonic| contains_instruction_mnemonic(contents, mnemonic))
+}
+
+/// Checks for mixed-signedness INT8 mma.sync with m16n8k16 u8*s8 (PTX 7.0, sm_80+).
+///
+/// PTX permits both wrapping and `.satfinite` accumulator-overflow behavior.
+fn contains_mma_m16n8k16_s32_u8_s8_features(contents: &str) -> bool {
+    [
+        "mma.sync.aligned.m16n8k16.row.col.s32.u8.s8.s32",
+        "mma.sync.aligned.m16n8k16.row.col.satfinite.s32.u8.s8.s32",
+    ]
+    .into_iter()
+    .any(|mnemonic| contains_instruction_mnemonic(contents, mnemonic))
+}
+
+/// Checks for any mixed-signedness INT8 mma.sync variant (PTX 7.0, sm_80+).
+///
+/// PTX permits both wrapping and `.satfinite` accumulator-overflow behavior.
+fn contains_mma_int8_mixed_features(contents: &str) -> bool {
+    contains_mma_m16n8k32_s32_s8_u8_features(contents)
+        || contains_mma_m16n8k32_s32_u8_s8_features(contents)
+        || contains_mma_m16n8k16_s32_s8_u8_features(contents)
+        || contains_mma_m16n8k16_s32_u8_s8_features(contents)
 }
 
 fn contains_instruction_mnemonic(contents: &str, mnemonic: &str) -> bool {
@@ -1382,6 +1483,7 @@ fn contains_sm80_features(contents: &str) -> bool {
         || contains_mma_m16n8k64_s32_u4_features(contents)
         || contains_mma_m16n8k256_s32_b1_and_features(contents)
         || contains_mma_m16n8k256_s32_b1_xor_features(contents)
+        || contains_mma_int8_mixed_features(contents)
         || contents
             .split(';')
             .any(|statement| statement.contains("cvt.") && statement.contains(".bf16x2.f32"))
@@ -1838,6 +1940,7 @@ fn detect_module_requirements_in_llvm_text(contents: &str) -> ModuleRequirements
         || contains_mma_m16n8k64_s32_u4_features(contents)
         || contains_mma_m16n8k256_s32_b1_and_features(contents)
         || contains_mma_m16n8k256_s32_b1_xor_features(contents)
+        || contains_mma_int8_mixed_features(contents)
     {
         ptx_isa = ptx_isa.max(PtxIsaRequirement::Ptx70);
     }
@@ -3385,50 +3488,108 @@ mod tests {
 
     #[test]
     fn integer_mma_detection_applies_sm80_and_ptx70_floors() {
-        let mnemonics = [
+        // (wrapping mnemonic, satfinite mnemonic, detect_fn, near-miss negatives)
+        let variants: [(&str, &str, fn(&str) -> bool, &[&str])] = [
             (
                 "mma.sync.aligned.m16n8k32.row.col.s32.u8.u8.s32 {$0,$1,$2,$3}, {$8,$9,$10,$11}, {$12,$13}, {$4,$5,$6,$7};",
+                "mma.sync.aligned.m16n8k32.row.col.satfinite.s32.u8.u8.s32 {$0,$1,$2,$3}, {$8,$9,$10,$11}, {$12,$13}, {$4,$5,$6,$7};",
                 contains_mma_m16n8k32_s32_u8_features as fn(&str) -> bool,
+                &[
+                    "mma.sync.aligned.m16n8k32.row.col.s32.u8.u8.s32x {$0};",
+                    "not_mma.sync.aligned.m16n8k32.row.col.s32.u8.u8.s32 {$0};",
+                    "$mma.sync.aligned.m16n8k32.row.col.satfinite.s32.u8.u8.s32 {$0};",
+                ],
             ),
             (
                 "mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32 {$0,$1,$2,$3}, {$8,$9}, {$10}, {$4,$5,$6,$7};",
+                "mma.sync.aligned.m16n8k16.row.col.satfinite.s32.s8.s8.s32 {$0,$1,$2,$3}, {$8,$9}, {$10}, {$4,$5,$6,$7};",
                 contains_mma_m16n8k16_s32_s8_features as fn(&str) -> bool,
+                &[
+                    "mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32x {$0};",
+                    "not_mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32 {$0};",
+                    "%mma.sync.aligned.m16n8k16.row.col.satfinite.s32.s8.s8.s32 {$0};",
+                ],
             ),
             (
                 "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32 {$0,$1,$2,$3}, {$8,$9}, {$10}, {$4,$5,$6,$7};",
+                "mma.sync.aligned.m16n8k16.row.col.satfinite.s32.u8.u8.s32 {$0,$1,$2,$3}, {$8,$9}, {$10}, {$4,$5,$6,$7};",
                 contains_mma_m16n8k16_s32_u8_features as fn(&str) -> bool,
+                &[
+                    "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32x {$0};",
+                    "not_mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32 {$0};",
+                    "@mma.sync.aligned.m16n8k16.row.col.satfinite.s32.u8.u8.s32 {$0};",
+                ],
             ),
             (
                 "mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 {$0,$1,$2,$3}, {$8,$9,$10,$11}, {$12,$13}, {$4,$5,$6,$7};",
+                "mma.sync.aligned.m16n8k64.row.col.satfinite.s32.s4.s4.s32 {$0,$1,$2,$3}, {$8,$9,$10,$11}, {$12,$13}, {$4,$5,$6,$7};",
                 contains_mma_m16n8k64_s32_s4_features as fn(&str) -> bool,
+                &[
+                    "mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32x {$0};",
+                    "not_mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 {$0};",
+                    "$mma.sync.aligned.m16n8k64.row.col.satfinite.s32.s4.s4.s32 {$0};",
+                ],
             ),
             (
                 "mma.sync.aligned.m16n8k64.row.col.s32.u4.u4.s32 {$0,$1,$2,$3}, {$8,$9,$10,$11}, {$12,$13}, {$4,$5,$6,$7};",
+                "mma.sync.aligned.m16n8k64.row.col.satfinite.s32.u4.u4.s32 {$0,$1,$2,$3}, {$8,$9,$10,$11}, {$12,$13}, {$4,$5,$6,$7};",
                 contains_mma_m16n8k64_s32_u4_features as fn(&str) -> bool,
+                &[
+                    "mma.sync.aligned.m16n8k64.row.col.s32.u4.u4.s32x {$0};",
+                    "not_mma.sync.aligned.m16n8k64.row.col.s32.u4.u4.s32 {$0};",
+                    "%mma.sync.aligned.m16n8k64.row.col.satfinite.s32.u4.u4.s32 {$0};",
+                ],
             ),
             (
                 "mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.and.popc {$0,$1,$2,$3}, {$8,$9,$10,$11}, {$12,$13}, {$4,$5,$6,$7};",
+                "mma.sync.aligned.m16n8k256.row.col.satfinite.s32.b1.b1.s32.and.popc {$0,$1,$2,$3}, {$8,$9,$10,$11}, {$12,$13}, {$4,$5,$6,$7};",
                 contains_mma_m16n8k256_s32_b1_and_features as fn(&str) -> bool,
+                &[
+                    "mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.and.popcx {$0};",
+                    "not_mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.and.popc {$0};",
+                    "$mma.sync.aligned.m16n8k256.row.col.satfinite.s32.b1.b1.s32.and.popc {$0};",
+                ],
             ),
             (
                 "mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.xor.popc {$0,$1,$2,$3}, {$8,$9,$10,$11}, {$12,$13}, {$4,$5,$6,$7};",
+                "mma.sync.aligned.m16n8k256.row.col.satfinite.s32.b1.b1.s32.xor.popc {$0,$1,$2,$3}, {$8,$9,$10,$11}, {$12,$13}, {$4,$5,$6,$7};",
                 contains_mma_m16n8k256_s32_b1_xor_features as fn(&str) -> bool,
+                &[
+                    "mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.xor.popcx {$0};",
+                    "not_mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.xor.popc {$0};",
+                    "%mma.sync.aligned.m16n8k256.row.col.satfinite.s32.b1.b1.s32.xor.popc {$0};",
+                ],
             ),
         ];
-        for (mnemonic, detect_fn) in &mnemonics {
+        for (mnemonic, satfinite_mnemonic, detect_fn, near_misses) in &variants {
+            // Wrapping form must match.
             assert!(detect_fn(mnemonic), "failed to detect: {mnemonic}");
             assert!(contains_sm80_features(mnemonic), "sm80 missed: {mnemonic}");
-            let requirements = detect_module_requirements_in_llvm_text(mnemonic);
-            assert_eq!(
-                requirements.features,
-                DetectedFeatures::Sm80,
-                "wrong features for: {mnemonic}"
+            // Satfinite form must also match.
+            assert!(
+                detect_fn(satfinite_mnemonic),
+                "failed to detect satfinite: {satfinite_mnemonic}"
             );
-            assert_eq!(
-                requirements.ptx_isa,
-                PtxIsaRequirement::Ptx70,
-                "wrong PTX ISA for: {mnemonic}"
+            assert!(
+                contains_sm80_features(satfinite_mnemonic),
+                "sm80 missed satfinite: {satfinite_mnemonic}"
             );
+            for spelling in [mnemonic, satfinite_mnemonic] {
+                let requirements = detect_module_requirements_in_llvm_text(spelling);
+                assert_eq!(
+                    requirements.features,
+                    DetectedFeatures::Sm80,
+                    "wrong features for: {spelling}"
+                );
+                assert_eq!(
+                    requirements.ptx_isa,
+                    PtxIsaRequirement::Ptx70,
+                    "wrong PTX ISA for: {spelling}"
+                );
+            }
+            for near_miss in *near_misses {
+                assert!(!detect_fn(near_miss), "matched near-miss: {near_miss}");
+            }
         }
     }
 
