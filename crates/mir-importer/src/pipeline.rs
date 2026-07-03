@@ -1292,19 +1292,42 @@ fn contains_mma_m16n8k16_f32_f16_features(contents: &str) -> bool {
         "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32",
 /// Checks for sparse MMA (mma.sp.sync) instructions (PTX 7.0, sm_80+).
 fn contains_sparse_mma_features(contents: &str) -> bool {
+    contains_sparse_mma_m16n8k32_f32_f16_features(contents)
+        || contains_sparse_mma_m16n8k32_f32_bf16_features(contents)
+        || contains_sparse_mma_m16n8k16_f32_tf32_features(contents)
+        || contains_sparse_mma_m16n8k64_s32_s8_features(contents)
+}
+
+fn contains_sparse_mma_m16n8k32_f32_f16_features(contents: &str) -> bool {
     contains_instruction_mnemonic(
         contents,
         "mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32",
-    ) || contains_instruction_mnemonic(
+    )
+}
+
+fn contains_sparse_mma_m16n8k32_f32_bf16_features(contents: &str) -> bool {
+    contains_instruction_mnemonic(
         contents,
         "mma.sp.sync.aligned.m16n8k32.row.col.f32.bf16.bf16.f32",
-    ) || contains_instruction_mnemonic(
+    )
+}
+
+fn contains_sparse_mma_m16n8k16_f32_tf32_features(contents: &str) -> bool {
+    contains_instruction_mnemonic(
         contents,
         "mma.sp.sync.aligned.m16n8k16.row.col.f32.tf32.tf32.f32",
-    ) || contains_instruction_mnemonic(
-        contents,
-        "mma.sp.sync.aligned.m16n8k64.row.col.s32.s8.s8.s32",
     )
+}
+
+/// PTX permits both wrapping and `.satfinite` accumulator-overflow behavior
+/// for integer sparse MMA variants.
+fn contains_sparse_mma_m16n8k64_s32_s8_features(contents: &str) -> bool {
+    [
+        "mma.sp.sync.aligned.m16n8k64.row.col.s32.s8.s8.s32",
+        "mma.sp.sync.aligned.m16n8k64.row.col.satfinite.s32.s8.s8.s32",
+    ]
+    .into_iter()
+    .any(|mnemonic| contains_instruction_mnemonic(contents, mnemonic))
 }
 
 fn contains_instruction_mnemonic(contents: &str, mnemonic: &str) -> bool {
@@ -3627,6 +3650,73 @@ mod tests {
                 ptx_isa: PtxIsaRequirement::Ptx78,
             }
         );
+    }
+
+    #[test]
+    fn sparse_mma_detection_enforces_sm80_and_ptx70() {
+        // Each float sparse MMA variant is detected without satfinite.
+        for mnemonic in [
+            "mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 {$0}, {$1}, {$2}, {$3};",
+            "mma.sp.sync.aligned.m16n8k32.row.col.f32.bf16.bf16.f32 {$0}, {$1}, {$2}, {$3};",
+            "mma.sp.sync.aligned.m16n8k16.row.col.f32.tf32.tf32.f32 {$0}, {$1}, {$2}, {$3};",
+        ] {
+            assert!(
+                contains_sparse_mma_features(mnemonic),
+                "missed {mnemonic:?}"
+            );
+            assert_eq!(
+                detect_module_requirements_in_llvm_text(mnemonic),
+                ModuleRequirements {
+                    features: DetectedFeatures::Sm80,
+                    ptx_isa: PtxIsaRequirement::Ptx70,
+                },
+                "{mnemonic:?}"
+            );
+        }
+
+        // The integer sparse variant is detected in both wrapping and satfinite forms.
+        for mnemonic in [
+            "mma.sp.sync.aligned.m16n8k64.row.col.s32.s8.s8.s32 {$0}, {$1}, {$2}, {$3};",
+            "mma.sp.sync.aligned.m16n8k64.row.col.satfinite.s32.s8.s8.s32 {$0}, {$1}, {$2}, {$3};",
+        ] {
+            assert!(
+                contains_sparse_mma_features(mnemonic),
+                "missed {mnemonic:?}"
+            );
+            assert_eq!(
+                detect_module_requirements_in_llvm_text(mnemonic),
+                ModuleRequirements {
+                    features: DetectedFeatures::Sm80,
+                    ptx_isa: PtxIsaRequirement::Ptx70,
+                },
+                "{mnemonic:?}"
+            );
+        }
+
+        // Float sparse variants must NOT match a satfinite form (it does not exist in PTX).
+        for near_miss in [
+            "mma.sp.sync.aligned.m16n8k32.row.col.satfinite.f32.f16.f16.f32 {$0};",
+            "mma.sp.sync.aligned.m16n8k32.row.col.satfinite.f32.bf16.bf16.f32 {$0};",
+            "mma.sp.sync.aligned.m16n8k16.row.col.satfinite.f32.tf32.tf32.f32 {$0};",
+        ] {
+            assert!(
+                !contains_sparse_mma_features(near_miss),
+                "matched invalid satfinite float form {near_miss:?}"
+            );
+        }
+
+        // Near-miss mnemonics must not match.
+        for near_miss in [
+            "mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32x {$0};",
+            "not_mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 {$0};",
+            "$mma.sp.sync.aligned.m16n8k64.row.col.s32.s8.s8.s32 {$0};",
+            "%mma.sp.sync.aligned.m16n8k64.row.col.s32.s8.s8.s32 {$0};",
+        ] {
+            assert!(
+                !contains_sparse_mma_features(near_miss),
+                "matched near-miss {near_miss:?}"
+            );
+        }
     }
 
     #[test]
