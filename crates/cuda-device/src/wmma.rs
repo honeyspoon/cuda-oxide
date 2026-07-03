@@ -581,4 +581,3 @@ pub unsafe fn mma_m16n8k16_f16_f16(c: [u32; 2], a: [u32; 4], b: [u32; 2]) -> [u3
     let _ = (c, a, b);
     unreachable!("mma_m16n8k16_f16_f16 called outside CUDA kernel context")
 }
-
