@@ -1611,6 +1611,145 @@ mod tests {
     }
 
     #[test]
+    fn unsigned_float_to_int_sat_uses_fptoui_and_unsigned_bounds() {
+        let mut ctx = Context::new();
+        let module = ModuleOp::new(&mut ctx, "fptoui_sat".try_into().unwrap());
+        let f32_ty: TypeHandle = FP32Type::get(&ctx).into();
+        let i32_ty: TypeHandle = IntegerType::get(&ctx, 32, Signedness::Signless).into();
+        direct_intrinsic_call(
+            &mut ctx,
+            &module,
+            "llvm_fptoui_sat_i32_f32",
+            i32_ty,
+            vec![f32_ty],
+        );
+
+        legalize_for_legacy_nvvm(&mut ctx, module.get_operation()).unwrap();
+
+        let ids = operation_ids(&ctx, module.get_operation());
+        assert_eq!(ids.iter().filter(|id| *id == "llvm.fcmp").count(), 3);
+        assert_eq!(ids.iter().filter(|id| *id == "llvm.select").count(), 3);
+        // Unsigned conversion must produce fptoui, not fptosi.
+        assert_eq!(ids.iter().filter(|id| *id == "llvm.fptoui").count(), 1);
+        assert!(!ids.iter().any(|id| id == "llvm.fptosi"), "{ids:?}");
+        module.get_operation().deref(&ctx).verify(&ctx).unwrap();
+    }
+
+    #[test]
+    fn float_to_int_sat_from_f64_source_uses_double_precision_bounds() {
+        let mut ctx = Context::new();
+        let module = ModuleOp::new(&mut ctx, "fptosi_sat_f64".try_into().unwrap());
+        let f64_ty: TypeHandle = FP64Type::get(&ctx).into();
+        let i32_ty: TypeHandle = IntegerType::get(&ctx, 32, Signedness::Signless).into();
+        direct_intrinsic_call(
+            &mut ctx,
+            &module,
+            "llvm_fptosi_sat_i32_f64",
+            i32_ty,
+            vec![f64_ty],
+        );
+
+        legalize_for_legacy_nvvm(&mut ctx, module.get_operation()).unwrap();
+
+        let ids = operation_ids(&ctx, module.get_operation());
+        assert_eq!(ids.iter().filter(|id| *id == "llvm.fcmp").count(), 3);
+        assert_eq!(ids.iter().filter(|id| *id == "llvm.select").count(), 3);
+        assert_eq!(ids.iter().filter(|id| *id == "llvm.fptosi").count(), 1);
+        // f64 source must not introduce an fpext (only f16 needs promotion).
+        assert!(!ids.iter().any(|id| id == "llvm.fpext"), "{ids:?}");
+        module.get_operation().deref(&ctx).verify(&ctx).unwrap();
+    }
+
+    #[test]
+    fn float_to_int_sat_with_narrow_and_wide_integer_targets() {
+        for (name, width) in [
+            ("llvm_fptosi_sat_i16_f32", 16u32),
+            ("llvm_fptosi_sat_i64_f32", 64),
+        ] {
+            let mut ctx = Context::new();
+            let module = ModuleOp::new(&mut ctx, name.try_into().unwrap());
+            let f32_ty: TypeHandle = FP32Type::get(&ctx).into();
+            let int_ty: TypeHandle = IntegerType::get(&ctx, width, Signedness::Signless).into();
+            direct_intrinsic_call(&mut ctx, &module, name, int_ty, vec![f32_ty]);
+
+            legalize_for_legacy_nvvm(&mut ctx, module.get_operation()).unwrap();
+
+            let ids = operation_ids(&ctx, module.get_operation());
+            assert_eq!(
+                ids.iter().filter(|id| *id == "llvm.fcmp").count(),
+                3,
+                "{name}: {ids:?}"
+            );
+            assert_eq!(
+                ids.iter().filter(|id| *id == "llvm.select").count(),
+                3,
+                "{name}: {ids:?}"
+            );
+            assert_eq!(
+                ids.iter().filter(|id| *id == "llvm.fptosi").count(),
+                1,
+                "{name}: {ids:?}"
+            );
+            module.get_operation().deref(&ctx).verify(&ctx).unwrap();
+        }
+    }
+
+    #[test]
+    fn float_to_int_sat_from_f16_is_rejected_on_legacy_dialect() {
+        let mut ctx = Context::new();
+        let module = ModuleOp::new(&mut ctx, "fptosi_sat_f16".try_into().unwrap());
+        let f16_ty: TypeHandle = FP16Type::get(&ctx).into();
+        let i32_ty: TypeHandle = IntegerType::get(&ctx, 32, Signedness::Signless).into();
+        direct_intrinsic_call(
+            &mut ctx,
+            &module,
+            "llvm_fptosi_sat_i32_f16",
+            i32_ty,
+            vec![f16_ty],
+        );
+
+        let error = legalize_for_legacy_nvvm(&mut ctx, module.get_operation()).unwrap_err();
+        let text = error.disp(&ctx).to_string();
+        assert!(text.contains("f16"), "{text}");
+        assert!(text.contains("CUDA 12"), "{text}");
+    }
+
+    #[test]
+    fn parse_float_to_int_sat_name_covers_all_valid_overloads() {
+        // Signed variants.
+        assert!(matches!(
+            parse_float_to_int_sat_name("llvm_fptosi_sat_i32_f32"),
+            Some((FloatToIntSatKind::Signed, 32, 32))
+        ));
+        assert!(matches!(
+            parse_float_to_int_sat_name("llvm_fptosi_sat_i64_f64"),
+            Some((FloatToIntSatKind::Signed, 64, 64))
+        ));
+        assert!(matches!(
+            parse_float_to_int_sat_name("llvm_fptosi_sat_i16_f32"),
+            Some((FloatToIntSatKind::Signed, 16, 32))
+        ));
+        // Unsigned variants.
+        assert!(matches!(
+            parse_float_to_int_sat_name("llvm_fptoui_sat_i32_f32"),
+            Some((FloatToIntSatKind::Unsigned, 32, 32))
+        ));
+        assert!(matches!(
+            parse_float_to_int_sat_name("llvm_fptoui_sat_i8_f32"),
+            Some((FloatToIntSatKind::Unsigned, 8, 32))
+        ));
+        // f16 source is valid to parse (rejection happens at validate time).
+        assert!(matches!(
+            parse_float_to_int_sat_name("llvm_fptosi_sat_i32_f16"),
+            Some((FloatToIntSatKind::Signed, 32, 16))
+        ));
+        // Invalid names.
+        assert!(parse_float_to_int_sat_name("llvm_fptosi_sat_i32_f128").is_none());
+        assert!(parse_float_to_int_sat_name("llvm_fptosi_sat_i0_f32").is_none());
+        assert!(parse_float_to_int_sat_name("unrelated_function").is_none());
+    }
+
+    #[test]
     fn modern_shuffle_and_vote_calls_use_legacy_aggregate_intrinsics() {
         let mut ctx = Context::new();
         let module = ModuleOp::new(&mut ctx, "warp".try_into().unwrap());
