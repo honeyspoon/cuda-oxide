@@ -1196,7 +1196,8 @@ fn test_mma_m16n8k32_s32_s8_u8_verifies_all_i32_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K32S32S8U8Op::new(bad_operand), &ctx).is_err());
+    verify_op(&MmaM16N8K32S32S8U8Op::new(bad_operand), &ctx)
+        .expect_err("MMA must reject non-i32 register operands");
 
     // Bad result type: one f32 among the i32 results.
     let bad_result = Operation::new(
@@ -1207,7 +1208,8 @@ fn test_mma_m16n8k32_s32_s8_u8_verifies_all_i32_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K32S32S8U8Op::new(bad_result), &ctx).is_err());
+    verify_op(&MmaM16N8K32S32S8U8Op::new(bad_result), &ctx)
+        .expect_err("MMA must reject wrong result type");
 
     // Bad operand arity: 9 instead of 10.
     let bad_arity = Operation::new(
@@ -1218,7 +1220,8 @@ fn test_mma_m16n8k32_s32_s8_u8_verifies_all_i32_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K32S32S8U8Op::new(bad_arity), &ctx).is_err());
+    verify_op(&MmaM16N8K32S32S8U8Op::new(bad_arity), &ctx)
+        .expect_err("MMA must reject wrong operand count");
 }
 
 #[test]
@@ -1259,7 +1262,8 @@ fn test_mma_m16n8k32_s32_u8_s8_verifies_all_i32_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K32S32U8S8Op::new(bad_operand), &ctx).is_err());
+    verify_op(&MmaM16N8K32S32U8S8Op::new(bad_operand), &ctx)
+        .expect_err("MMA must reject non-i32 register operands");
 
     // Bad result type: one f32 among the i32 results.
     let bad_result = Operation::new(
@@ -1270,7 +1274,8 @@ fn test_mma_m16n8k32_s32_u8_s8_verifies_all_i32_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K32S32U8S8Op::new(bad_result), &ctx).is_err());
+    verify_op(&MmaM16N8K32S32U8S8Op::new(bad_result), &ctx)
+        .expect_err("MMA must reject wrong result type");
 
     // Bad operand arity: 9 instead of 10.
     let bad_arity = Operation::new(
@@ -1281,7 +1286,8 @@ fn test_mma_m16n8k32_s32_u8_s8_verifies_all_i32_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K32S32U8S8Op::new(bad_arity), &ctx).is_err());
+    verify_op(&MmaM16N8K32S32U8S8Op::new(bad_arity), &ctx)
+        .expect_err("MMA must reject wrong operand count");
 }
 
 #[test]
@@ -1322,7 +1328,8 @@ fn test_mma_m16n8k16_s32_s8_u8_verifies_all_i32_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K16S32S8U8Op::new(bad_operand), &ctx).is_err());
+    verify_op(&MmaM16N8K16S32S8U8Op::new(bad_operand), &ctx)
+        .expect_err("MMA must reject non-i32 register operands");
 
     // Bad result type: one f32 among the i32 results.
     let bad_result = Operation::new(
@@ -1333,7 +1340,8 @@ fn test_mma_m16n8k16_s32_s8_u8_verifies_all_i32_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K16S32S8U8Op::new(bad_result), &ctx).is_err());
+    verify_op(&MmaM16N8K16S32S8U8Op::new(bad_result), &ctx)
+        .expect_err("MMA must reject wrong result type");
 
     // Bad operand arity: 6 instead of 7.
     let bad_arity = Operation::new(
@@ -1344,7 +1352,8 @@ fn test_mma_m16n8k16_s32_s8_u8_verifies_all_i32_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K16S32S8U8Op::new(bad_arity), &ctx).is_err());
+    verify_op(&MmaM16N8K16S32S8U8Op::new(bad_arity), &ctx)
+        .expect_err("MMA must reject wrong operand count");
 }
 
 #[test]
@@ -1385,7 +1394,8 @@ fn test_mma_m16n8k16_s32_u8_s8_verifies_all_i32_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K16S32U8S8Op::new(bad_operand), &ctx).is_err());
+    verify_op(&MmaM16N8K16S32U8S8Op::new(bad_operand), &ctx)
+        .expect_err("MMA must reject non-i32 register operands");
 
     // Bad result type: one f32 among the i32 results.
     let bad_result = Operation::new(
@@ -1396,7 +1406,8 @@ fn test_mma_m16n8k16_s32_u8_s8_verifies_all_i32_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K16S32U8S8Op::new(bad_result), &ctx).is_err());
+    verify_op(&MmaM16N8K16S32U8S8Op::new(bad_result), &ctx)
+        .expect_err("MMA must reject wrong result type");
 
     // Bad operand arity: 6 instead of 7.
     let bad_arity = Operation::new(
@@ -1407,5 +1418,6 @@ fn test_mma_m16n8k16_s32_u8_s8_verifies_all_i32_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K16S32U8S8Op::new(bad_arity), &ctx).is_err());
+    verify_op(&MmaM16N8K16S32U8S8Op::new(bad_arity), &ctx)
+        .expect_err("MMA must reject wrong operand count");
 }
