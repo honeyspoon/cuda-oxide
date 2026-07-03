@@ -1234,6 +1234,100 @@ fn legacy_kernel_metadata_uses_typed_function_references() {
 }
 
 #[test]
+fn llvm_used_lists_multiple_kernels_in_legacy_mode() {
+    let mut ctx = Context::new();
+    let module = ModuleOp::new(&mut ctx, "multi_kernel".try_into().unwrap());
+    let module_block = module_top_block(&mut ctx, &module);
+    let ptr_ty = PointerType::get(&ctx, 0);
+    let void_ty = VoidType::get(&ctx);
+    let func_ty = FuncType::get(&ctx, void_ty.into(), vec![ptr_ty.into()], false);
+
+    for name in ["kernel_alpha", "kernel_beta", "kernel_gamma"] {
+        let func = FuncOp::new(&mut ctx, name.try_into().unwrap(), func_ty);
+        func.get_operation().deref_mut(&ctx).attributes.set(
+            "gpu_kernel".try_into().unwrap(),
+            StringAttr::new("true".into()),
+        );
+        let entry = func.get_or_create_entry_block(&mut ctx);
+        ReturnOp::new(&mut ctx, None)
+            .get_operation()
+            .insert_at_back(entry, &ctx);
+        func.get_operation().insert_at_back(module_block, &ctx);
+    }
+
+    let config = NvvmExportConfig::new(NvvmIrDialect::LegacyLlvm7);
+    let ir = export_module_to_string_with_config(&ctx, &module, &config)
+        .expect("multi-kernel legacy export succeeds");
+    assert!(ir.contains("[3 x i8*]"), "expected 3-element array:\n{ir}");
+    for name in ["kernel_alpha", "kernel_beta", "kernel_gamma"] {
+        assert!(
+            ir.contains(&format!("@{name} to i8*")),
+            "@{name} missing from @llvm.used:\n{ir}"
+        );
+    }
+}
+
+#[test]
+fn llvm_used_uses_opaque_pointers_in_modern_mode() {
+    let mut ctx = Context::new();
+    let module = ModuleOp::new(&mut ctx, "modern_used".try_into().unwrap());
+    let module_block = module_top_block(&mut ctx, &module);
+    let ptr_ty = PointerType::get(&ctx, 0);
+    let void_ty = VoidType::get(&ctx);
+    let func_ty = FuncType::get(&ctx, void_ty.into(), vec![ptr_ty.into()], false);
+    let func = FuncOp::new(&mut ctx, "modern_kernel".try_into().unwrap(), func_ty);
+    func.get_operation().deref_mut(&ctx).attributes.set(
+        "gpu_kernel".try_into().unwrap(),
+        StringAttr::new("true".into()),
+    );
+    let entry = func.get_or_create_entry_block(&mut ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    func.get_operation().insert_at_back(module_block, &ctx);
+
+    let config = NvvmExportConfig::new(NvvmIrDialect::Modern);
+    let ir = export_module_to_string_with_config(&ctx, &module, &config)
+        .expect("modern export succeeds");
+    assert!(
+        ir.contains("@llvm.used = appending global [1 x ptr] [ptr @modern_kernel]"),
+        "modern @llvm.used must use opaque `ptr`, not typed `i8*`:\n{ir}"
+    );
+    // Must NOT contain legacy typed-pointer bitcasts.
+    assert!(
+        !ir.contains("bitcast"),
+        "modern mode must not emit bitcast in @llvm.used:\n{ir}"
+    );
+}
+
+#[test]
+fn ptx_export_does_not_emit_llvm_used() {
+    let mut ctx = Context::new();
+    let module = ModuleOp::new(&mut ctx, "ptx_no_used".try_into().unwrap());
+    let module_block = module_top_block(&mut ctx, &module);
+    let ptr_ty = PointerType::get(&ctx, 0);
+    let void_ty = VoidType::get(&ctx);
+    let func_ty = FuncType::get(&ctx, void_ty.into(), vec![ptr_ty.into()], false);
+    let func = FuncOp::new(&mut ctx, "ptx_kernel".try_into().unwrap(), func_ty);
+    func.get_operation().deref_mut(&ctx).attributes.set(
+        "gpu_kernel".try_into().unwrap(),
+        StringAttr::new("true".into()),
+    );
+    let entry = func.get_or_create_entry_block(&mut ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    func.get_operation().insert_at_back(module_block, &ctx);
+
+    let ir = export_module_to_string_with_config(&ctx, &module, &PtxExportConfig)
+        .expect("PTX export succeeds");
+    assert!(
+        !ir.contains("@llvm.used"),
+        "PTX export must not emit @llvm.used (only needed for LTOIR/NVVM):\n{ir}"
+    );
+}
+
+#[test]
 fn legacy_export_rejects_debug_metadata() {
     let mut ctx = Context::new();
     let module = ModuleOp::new(&mut ctx, "legacy_debug".try_into().unwrap());
