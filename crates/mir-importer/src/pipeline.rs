@@ -35,6 +35,7 @@
 //! | TMA/mbarrier                  | sm_100  | Hopper+ compatible   |
 //! | bf16x2 add/sub/mul            | sm_90   | Hopper+ compatible   |
 //! | bf16x2 packed atomic add      | sm_90   | PTX 7.8+             |
+//! | `cvt.rn.bf16x2.f32`           | sm_80   | PTX 7.0+             |
 //! | other bf16x2 ALU              | sm_80   | Ampere+ compatible   |
 //! | BF16 `mma.m16n8k16`           | sm_80   | PTX 7.0+             |
 //! | INT8 `mma.m16n8k32`           | sm_80   | PTX 7.0+             |
@@ -1293,6 +1294,14 @@ fn contains_mma_m16n8k16_f32_f16_features(contents: &str) -> bool {
     )
 }
 
+/// Checks for the packed BF16 conversion `cvt.rn.bf16x2.f32` (PTX 7.0, sm_80+).
+///
+/// This instruction converts two FP32 values into a packed bf16x2 pair with
+/// round-to-nearest-even. It was introduced on Ampere and requires PTX 7.0.
+fn contains_cvt_bf16x2_features(contents: &str) -> bool {
+    contains_instruction_mnemonic(contents, "cvt.rn.bf16x2.f32")
+}
+
 fn contains_instruction_mnemonic(contents: &str, mnemonic: &str) -> bool {
     contents.match_indices(mnemonic).any(|(index, _)| {
         let preceding = &contents[..index];
@@ -1368,6 +1377,7 @@ fn contains_sm80_features(contents: &str) -> bool {
     .iter()
     .any(|mnemonic| contains_instruction_mnemonic(contents, mnemonic))
         || contains_mma_m8n8k4_f64_features(contents)
+        || contains_cvt_bf16x2_features(contents)
         || contents
             .split(';')
             .any(|statement| statement.contains("cvt.") && statement.contains(".bf16x2.f32"))
@@ -1823,6 +1833,7 @@ fn detect_module_requirements_in_llvm_text(contents: &str) -> ModuleRequirements
         || contains_mma_m16n8k8_f32_tf32_features(contents)
         || contains_mma_m16n8k32_s32_s8_features(contents)
         || contains_mma_m8n8k4_f64_features(contents)
+        || contains_cvt_bf16x2_features(contents)
     {
         ptx_isa = ptx_isa.max(PtxIsaRequirement::Ptx70);
     }
@@ -3604,6 +3615,82 @@ mod tests {
         );
 
         let combined = format!("{mnemonic}\nmovmatrix.sync.aligned.m8n8.trans.b16 $0, $1;");
+        assert_eq!(
+            detect_module_requirements_in_llvm_text(&combined),
+            ModuleRequirements {
+                features: DetectedFeatures::Sm80 | DetectedFeatures::Movmatrix,
+                ptx_isa: PtxIsaRequirement::Ptx78,
+            }
+        );
+    }
+
+    #[test]
+    fn cvt_bf16x2_detection_applies_exact_sm80_and_ptx70_floors() {
+        let mnemonic = "cvt.rn.bf16x2.f32 $0, $1, $2;";
+        for spelling in [
+            mnemonic,
+            "cvt.rn.bf16x2.f32\t$0, $1, $2;",
+            "cvt.rn.bf16x2.f32\n$0, $1, $2;",
+            "cvt.rn.bf16x2.f32\\09$0, $1, $2;",
+            "cvt.rn.bf16x2.f32\\0A$0, $1, $2;",
+            ";cvt.rn.bf16x2.f32 $0, $1, $2;",
+            "prefix\\0Acvt.rn.bf16x2.f32 $0, $1, $2;",
+            "\"cvt.rn.bf16x2.f32 $0, $1, $2;",
+            "{cvt.rn.bf16x2.f32 $0, $1, $2;",
+            "$L:cvt.rn.bf16x2.f32 $0, $1, $2;",
+            "/* comment */cvt.rn.bf16x2.f32 $0, $1, $2;",
+            "@p cvt.rn.bf16x2.f32 $0, $1, $2;",
+            "@!%p\\09cvt.rn.bf16x2.f32 $0, $1, $2;",
+        ] {
+            assert!(
+                contains_cvt_bf16x2_features(spelling),
+                "missed {spelling:?}"
+            );
+        }
+
+        let requirements = detect_module_requirements_in_llvm_text(mnemonic);
+        assert_eq!(
+            requirements,
+            ModuleRequirements {
+                features: DetectedFeatures::Sm80,
+                ptx_isa: PtxIsaRequirement::Ptx70,
+            }
+        );
+        assert_eq!(select_target(requirements.features).unwrap(), "sm_80");
+
+        let lower_target =
+            resolve_ptx_target(Some("sm_75"), None, requirements.features).unwrap_err();
+        assert!(
+            lower_target
+                .to_string()
+                .contains("cannot lower detected feature Sm80"),
+            "{lower_target}"
+        );
+        let (target, _) = resolve_ptx_target(Some("sm_80"), None, requirements.features).unwrap();
+        assert_eq!(target, "sm_80");
+
+        for near_miss in [
+            "cvt.rn.bf16x2.f32x $0, $1, $2;",
+            "not_cvt.rn.bf16x2.f32 $0, $1, $2;",
+            "$cvt.rn.bf16x2.f32 $0, $1, $2;",
+            "%cvt.rn.bf16x2.f32 $0, $1, $2;",
+            "@cvt.rn.bf16x2.f32 $0, $1, $2;",
+            "!cvt.rn.bf16x2.f32 $0, $1, $2;",
+            "@!cvt.rn.bf16x2.f32 $0, $1, $2;",
+            "not$cvt.rn.bf16x2.f32 $0, $1, $2;",
+            "/cvt.rn.bf16x2.f32 $0, $1, $2;",
+            ")cvt.rn.bf16x2.f32 $0, $1, $2;",
+        ] {
+            assert!(
+                !contains_cvt_bf16x2_features(near_miss),
+                "matched {near_miss:?}"
+            );
+        }
+
+        let combined = format!(
+            "{mnemonic}\n{}",
+            "movmatrix.sync.aligned.m8n8.trans.b16 $0, $1;"
+        );
         assert_eq!(
             detect_module_requirements_in_llvm_text(&combined),
             ModuleRequirements {

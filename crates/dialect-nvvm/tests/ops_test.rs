@@ -21,7 +21,7 @@ use pliron::{
     builtin::types::{FP32Type, FP64Type, IntegerType, Signedness},
     common_traits::Verify,
     context::Context,
-    op::{verify_op, Op},
+    op::{Op, verify_op},
     operation::Operation,
 };
 
