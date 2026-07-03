@@ -478,10 +478,6 @@ pub unsafe fn mma_m16n8k32_s32_s8(c: [i32; 4], a: [u32; 4], b: [u32; 2]) -> [i32
 /// ```text
 /// x1: lanes 0..7 provide addresses (1 tile, 8 rows)
 /// ```
-///
-/// # See also
-///
-/// [`stmatrix_m8n8_x1_trans`], [`ldmatrix_x1`]
 #[inline(never)]
 pub unsafe fn stmatrix_m8n8_x1(smem_addr: *mut u32, r: u32) {
     let _ = (smem_addr, r);
@@ -490,8 +486,10 @@ pub unsafe fn stmatrix_m8n8_x1(smem_addr: *mut u32, r: u32) {
 
 /// Store one 8×8 matrix tile from a register to shared memory (column-major).
 ///
-/// Like [`stmatrix_m8n8_x1`] but with the `.trans` modifier, which selects
-/// column-major storage layout.
+/// Each lane contributes one `u32` (two packed b16 elements). The `.trans`
+/// modifier selects column-major storage layout: the warp cooperatively
+/// writes a single 8×8 tile (8 rows, 16 bytes per column) to the address
+/// provided by lanes 0-7.
 ///
 /// # PTX
 ///
@@ -517,10 +515,6 @@ pub unsafe fn stmatrix_m8n8_x1(smem_addr: *mut u32, r: u32) {
 /// ```text
 /// x1: lanes 0..7 provide addresses (1 tile, 8 rows)
 /// ```
-///
-/// # See also
-///
-/// [`stmatrix_m8n8_x1`], [`ldmatrix_x1_trans`]
 #[inline(never)]
 pub unsafe fn stmatrix_m8n8_x1_trans(smem_addr: *mut u32, r: u32) {
     let _ = (smem_addr, r);
