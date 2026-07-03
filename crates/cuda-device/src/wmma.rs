@@ -497,7 +497,19 @@ pub unsafe fn mma_sp_m16n8k32_f32_f16(
 /// Warp MMA with 2:4 structured sparsity: D = A_sparse × B + C
 /// (m16n8k32, f32 output, bf16 inputs).
 ///
-/// Same layout as [`mma_sp_m16n8k32_f32_f16`] but with bf16 element types.
+/// Performs a sparse matrix multiply-add where the A matrix uses 2:4
+/// structured sparsity. In every group of 4 consecutive elements along K,
+/// exactly 2 are non-zero. The A fragment is half the size of the dense
+/// variant because only the non-zero values are stored.
+///
+/// # Operands
+///
+/// - `c`: `[f32; 4]` accumulator registers
+/// - `a`: `[u32; 4]` packed sparse A fragment (bf16 non-zero values)
+/// - `b`: `[u32; 2]` packed B fragment (bf16 values)
+/// - `meta`: `u32` sparsity metadata describing non-zero positions
+///
+/// The selector immediate is fixed to 0x0 (uses the first metadata half).
 ///
 /// # PTX
 ///
