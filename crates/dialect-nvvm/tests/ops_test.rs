@@ -939,7 +939,8 @@ fn test_mma_m16n8k8_bf16_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K8F32Bf16Op::new(bad_c), &ctx).is_err());
+    verify_op(&MmaM16N8K8F32Bf16Op::new(bad_c), &ctx)
+        .expect_err("MMA must reject non-f32 accumulator");
 
     // Bad packed-register: i64 instead of i32 at packed position 0.
     let bad_packed_operands = (0..4)
@@ -954,7 +955,8 @@ fn test_mma_m16n8k8_bf16_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K8F32Bf16Op::new(bad_packed), &ctx).is_err());
+    verify_op(&MmaM16N8K8F32Bf16Op::new(bad_packed), &ctx)
+        .expect_err("MMA must reject non-i32 packed operands");
 
     // Bad result type: one i32 among f32 results.
     let bad_result = Operation::new(
@@ -965,7 +967,8 @@ fn test_mma_m16n8k8_bf16_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K8F32Bf16Op::new(bad_result), &ctx).is_err());
+    verify_op(&MmaM16N8K8F32Bf16Op::new(bad_result), &ctx)
+        .expect_err("MMA must reject wrong result type");
 
     // Bad operand arity: 6 instead of 7.
     let bad_operand_arity = Operation::new(
@@ -979,7 +982,8 @@ fn test_mma_m16n8k8_bf16_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K8F32Bf16Op::new(bad_operand_arity), &ctx).is_err());
+    verify_op(&MmaM16N8K8F32Bf16Op::new(bad_operand_arity), &ctx)
+        .expect_err("MMA must reject wrong operand count");
 
     // Bad result arity: 3 instead of 4.
     let bad_result_arity = Operation::new(
@@ -990,7 +994,8 @@ fn test_mma_m16n8k8_bf16_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K8F32Bf16Op::new(bad_result_arity), &ctx).is_err());
+    verify_op(&MmaM16N8K8F32Bf16Op::new(bad_result_arity), &ctx)
+        .expect_err("MMA must reject wrong result count");
 }
 
 #[test]
@@ -1040,7 +1045,8 @@ fn test_mma_m16n8k4_tf32_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K4F32Tf32Op::new(bad_c), &ctx).is_err());
+    verify_op(&MmaM16N8K4F32Tf32Op::new(bad_c), &ctx)
+        .expect_err("MMA must reject non-f32 accumulator");
 
     // Bad packed-register: i64 instead of i32 at packed position 0.
     let bad_packed_operands = (0..4)
@@ -1055,7 +1061,8 @@ fn test_mma_m16n8k4_tf32_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K4F32Tf32Op::new(bad_packed), &ctx).is_err());
+    verify_op(&MmaM16N8K4F32Tf32Op::new(bad_packed), &ctx)
+        .expect_err("MMA must reject non-i32 packed operands");
 
     // Bad result type: one i32 among f32 results.
     let bad_result = Operation::new(
@@ -1066,7 +1073,8 @@ fn test_mma_m16n8k4_tf32_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K4F32Tf32Op::new(bad_result), &ctx).is_err());
+    verify_op(&MmaM16N8K4F32Tf32Op::new(bad_result), &ctx)
+        .expect_err("MMA must reject wrong result type");
 
     // Bad operand arity: 6 instead of 7.
     let bad_operand_arity = Operation::new(
@@ -1080,7 +1088,8 @@ fn test_mma_m16n8k4_tf32_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K4F32Tf32Op::new(bad_operand_arity), &ctx).is_err());
+    verify_op(&MmaM16N8K4F32Tf32Op::new(bad_operand_arity), &ctx)
+        .expect_err("MMA must reject wrong operand count");
 
     // Bad result arity: 3 instead of 4.
     let bad_result_arity = Operation::new(
@@ -1091,7 +1100,8 @@ fn test_mma_m16n8k4_tf32_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K4F32Tf32Op::new(bad_result_arity), &ctx).is_err());
+    verify_op(&MmaM16N8K4F32Tf32Op::new(bad_result_arity), &ctx)
+        .expect_err("MMA must reject wrong result count");
 }
 
 #[test]
@@ -1129,7 +1139,7 @@ fn test_mma_m16n8k4_f64_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K4F64Op::new(bad_c), &ctx).is_err());
+    verify_op(&MmaM16N8K4F64Op::new(bad_c), &ctx).expect_err("MMA must reject non-f64 accumulator");
 
     // Bad A/B fragment: f32 instead of f64 at position 5.
     let bad_fragment_operands: Vec<_> = (0..7)
@@ -1143,7 +1153,8 @@ fn test_mma_m16n8k4_f64_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K4F64Op::new(bad_fragment), &ctx).is_err());
+    verify_op(&MmaM16N8K4F64Op::new(bad_fragment), &ctx)
+        .expect_err("MMA must reject non-f64 operands");
 
     // Bad result type: one f32 among f64 results.
     let bad_result = Operation::new(
@@ -1154,7 +1165,8 @@ fn test_mma_m16n8k4_f64_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K4F64Op::new(bad_result), &ctx).is_err());
+    verify_op(&MmaM16N8K4F64Op::new(bad_result), &ctx)
+        .expect_err("MMA must reject wrong result type");
 
     // Bad operand arity: 6 instead of 7.
     let bad_operand_arity = Operation::new(
@@ -1165,7 +1177,8 @@ fn test_mma_m16n8k4_f64_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K4F64Op::new(bad_operand_arity), &ctx).is_err());
+    verify_op(&MmaM16N8K4F64Op::new(bad_operand_arity), &ctx)
+        .expect_err("MMA must reject wrong operand count");
 
     // Bad result arity: 3 instead of 4.
     let bad_result_arity = Operation::new(
@@ -1176,7 +1189,8 @@ fn test_mma_m16n8k4_f64_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K4F64Op::new(bad_result_arity), &ctx).is_err());
+    verify_op(&MmaM16N8K4F64Op::new(bad_result_arity), &ctx)
+        .expect_err("MMA must reject wrong result count");
 }
 
 #[test]
@@ -1220,7 +1234,8 @@ fn test_mma_m16n8k16_f16_f16_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K16F16F16Op::new(bad_c), &ctx).is_err());
+    verify_op(&MmaM16N8K16F16F16Op::new(bad_c), &ctx)
+        .expect_err("MMA must reject non-i32 accumulator");
 
     // Bad packed-register: i64 instead of i32 at position 4.
     let bad_packed_operands: Vec<_> = (0..8)
@@ -1234,7 +1249,8 @@ fn test_mma_m16n8k16_f16_f16_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K16F16F16Op::new(bad_packed), &ctx).is_err());
+    verify_op(&MmaM16N8K16F16F16Op::new(bad_packed), &ctx)
+        .expect_err("MMA must reject non-i32 packed operands");
 
     // Bad result type: f32 instead of i32 in result.
     let bad_result = Operation::new(
@@ -1245,7 +1261,8 @@ fn test_mma_m16n8k16_f16_f16_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K16F16F16Op::new(bad_result), &ctx).is_err());
+    verify_op(&MmaM16N8K16F16F16Op::new(bad_result), &ctx)
+        .expect_err("MMA must reject wrong result type");
 
     // Bad operand arity: 7 instead of 8.
     let bad_operand_arity = Operation::new(
@@ -1256,7 +1273,8 @@ fn test_mma_m16n8k16_f16_f16_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K16F16F16Op::new(bad_operand_arity), &ctx).is_err());
+    verify_op(&MmaM16N8K16F16F16Op::new(bad_operand_arity), &ctx)
+        .expect_err("MMA must reject wrong operand count");
 
     // Bad result arity: 1 instead of 2.
     let bad_result_arity = Operation::new(
@@ -1267,5 +1285,6 @@ fn test_mma_m16n8k16_f16_f16_verifies_exact_register_signature() {
         vec![],
         0,
     );
-    assert!(verify_op(&MmaM16N8K16F16F16Op::new(bad_result_arity), &ctx).is_err());
+    verify_op(&MmaM16N8K16F16F16Op::new(bad_result_arity), &ctx)
+        .expect_err("MMA must reject wrong result count");
 }
