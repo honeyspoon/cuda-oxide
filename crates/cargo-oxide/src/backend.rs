@@ -125,7 +125,24 @@ pub fn find_or_build_backend(workspace_root: &Path, configured_backend: Option<&
         if cached_so.exists() {
             let source_dir = cache_dir.join("src/crates/rustc-codegen-cuda");
             match cached_backend_status(&cached_so, Some(&source_dir)) {
-                CacheStatus::Fresh => return cached_so,
+                CacheStatus::Fresh => {
+                    // Print the cached source commit hash so users can
+                    // diagnose stale caches that lag behind upstream.
+                    // This runs only on the happy path (cache is fresh),
+                    // so it costs at most one `git rev-parse`.
+                    if let Some(src_root) = cache_dir
+                        .join("src")
+                        .is_dir()
+                        .then(|| cache_dir.join("src"))
+                        && let Some(hash) = cached_source_commit(&src_root)
+                    {
+                        eprintln!(
+                            "Using cached backend (source at {}).",
+                            &hash[..hash.len().min(12)]
+                        );
+                    }
+                    return cached_so;
+                }
                 CacheStatus::StaleVsBinary => invalidate_cache(&cache_dir),
                 CacheStatus::StaleVsToolchain => {
                     eprintln!(
@@ -257,6 +274,20 @@ fn cached_backend_status(cached_so: &Path, source_dir: Option<&Path>) -> CacheSt
     }
 
     CacheStatus::Fresh
+}
+
+/// Returns the short git commit hash of the cached source tree, or `None` if
+/// the source isn't a git repo or `git` isn't available.
+fn cached_source_commit(source_root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(source_root)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// File next to the cached `.so` recording the toolchain it was built against.
@@ -989,6 +1020,32 @@ mod tests {
         ));
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn cached_source_commit_returns_hash_for_git_repo() {
+        // Use the workspace root of this very repo as the source dir.
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root");
+        let hash = cached_source_commit(repo_root);
+        assert!(hash.is_some(), "must return a commit hash for a git repo");
+        let hash = hash.unwrap();
+        // A full SHA-1 hex hash is 40 characters.
+        assert!(
+            hash.len() >= 40 && hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "must be a valid hex SHA-1: {hash}"
+        );
+    }
+
+    #[test]
+    fn cached_source_commit_returns_none_for_non_repo() {
+        let dir = tempdir();
+        assert!(
+            cached_source_commit(&dir).is_none(),
+            "must return None for a non-git directory"
+        );
     }
 
     fn write_with_mtime(path: &Path, contents: &[u8], mtime: SystemTime) {
