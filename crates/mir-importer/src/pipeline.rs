@@ -1290,6 +1290,9 @@ fn contains_mma_m16n8k16_f32_f16_features(contents: &str) -> bool {
     contains_instruction_mnemonic(
         contents,
         "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32",
+    )
+}
+
 /// Checks for sparse MMA (mma.sp.sync) instructions (PTX 7.0, sm_80+).
 fn contains_sparse_mma_features(contents: &str) -> bool {
     contains_sparse_mma_m16n8k32_f32_f16_features(contents)

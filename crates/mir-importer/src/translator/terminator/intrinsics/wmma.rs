@@ -16,8 +16,8 @@ use dialect_mir::{
 };
 use dialect_nvvm::ops::{
     MmaM8N8K4F64Op, MmaM16N8K8F32Tf32Op, MmaM16N8K16F32Bf16Op, MmaM16N8K16F32F16Op,
-    MmaM16N8K32S32S8Op, MmaSpM16N8K16F32Tf32Op, MmaSpM16N8K32F32Bf16Op,
-    MmaSpM16N8K32F32F16Op, MmaSpM16N8K64S32S8Op, MovmatrixTransB16Op,
+    MmaM16N8K32S32S8Op, MmaSpM16N8K16F32Tf32Op, MmaSpM16N8K32F32Bf16Op, MmaSpM16N8K32F32F16Op,
+    MmaSpM16N8K64S32S8Op, MovmatrixTransB16Op,
 };
 use pliron::basic_block::BasicBlock;
 use pliron::builtin::types::{FP32Type, FP64Type, IntegerType, Signedness};
