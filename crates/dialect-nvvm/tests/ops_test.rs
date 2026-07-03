@@ -13,7 +13,9 @@ use dialect_nvvm::ops::{
     ReadPtxSregSmIdOp, ReadPtxSregTidXOp, ReadPtxSregTotalSmemSizeOp, ReadPtxSregWarpIdOp,
     ReduxSyncAddOp, ReduxSyncAndOp, ReduxSyncMaxOp, ReduxSyncMinOp, ReduxSyncOrOp, ReduxSyncUmaxOp,
     ReduxSyncUminOp, ReduxSyncXorOp, ShflSyncBflyI64Op, ShflSyncDownI64Op, ShflSyncIdxI64Op,
-    ShflSyncUpI64Op, StmatrixM8n8X4Op, ThreadfenceBlockOp, ThreadfenceOp, ThreadfenceSystemOp,
+    ShflSyncUpI64Op, StmatrixM8n8X1Op, StmatrixM8n8X1TransOp,
+    StmatrixM8n8X4Op, ThreadfenceBlockOp, ThreadfenceOp, ThreadfenceSystemOp,
+
 };
 use pliron::{
     basic_block::BasicBlock,
@@ -1154,4 +1156,99 @@ fn test_shfl_sync_i64_construct_and_verify() {
         );
         assert!(verify_op(&ShflSyncIdxI64Op::new(bad), &ctx).is_err());
     }
+}
+
+#[test]
+fn test_stmatrix_x1_ops_verify_one_pointer_and_one_i32_register() {
+    let mut ctx = Context::new();
+    dialect_mir::register(&mut ctx);
+    dialect_nvvm::register(&mut ctx);
+
+    let i8_ty = IntegerType::get(&ctx, 8, Signedness::Signless);
+    let i32_ty = IntegerType::get(&ctx, 32, Signedness::Signless);
+    let i64_ty = IntegerType::get(&ctx, 64, Signedness::Signless);
+    let f32_ty = FP32Type::get(&ctx);
+    let ptr_ty = MirPtrType::get_generic(&mut ctx, i8_ty.into(), true);
+
+    let block = BasicBlock::new(
+        &mut ctx,
+        None,
+        vec![ptr_ty.into(), i32_ty.into(), i64_ty.into(), f32_ty.into()],
+    );
+    let ptr_value = block.deref(&ctx).get_argument(0);
+    let i32_value = block.deref(&ctx).get_argument(1);
+    let i64_value = block.deref(&ctx).get_argument(2);
+    let f32_value = block.deref(&ctx).get_argument(3);
+
+    macro_rules! check_stmatrix_x1 {
+        ($op:ty) => {{
+            // Valid: 1 pointer + 1 i32 register, 0 results.
+            let valid = Operation::new(
+                &mut ctx,
+                <$op>::get_concrete_op_info(),
+                vec![],
+                vec![ptr_value, i32_value],
+                vec![],
+                0,
+            );
+            <$op>::new(valid)
+                .verify(&ctx)
+                .expect("valid stmatrix x1 with ptr + i32 should verify");
+
+            // Bad pointer: i64 instead of MirPtrType.
+            let bad_ptr = Operation::new(
+                &mut ctx,
+                <$op>::get_concrete_op_info(),
+                vec![],
+                vec![i64_value, i32_value],
+                vec![],
+                0,
+            );
+            <$op>::new(bad_ptr)
+                .verify(&ctx)
+                .expect_err("non-pointer first operand should fail verification");
+
+            // Bad register type: f32 instead of i32.
+            let bad_reg = Operation::new(
+                &mut ctx,
+                <$op>::get_concrete_op_info(),
+                vec![],
+                vec![ptr_value, f32_value],
+                vec![],
+                0,
+            );
+            <$op>::new(bad_reg)
+                .verify(&ctx)
+                .expect_err("non-i32 register operand should fail verification");
+
+            // Bad arity: 3 operands instead of 2.
+            let bad_arity = Operation::new(
+                &mut ctx,
+                <$op>::get_concrete_op_info(),
+                vec![],
+                vec![ptr_value, i32_value, i32_value],
+                vec![],
+                0,
+            );
+            <$op>::new(bad_arity)
+                .verify(&ctx)
+                .expect_err("wrong operand count should fail verification");
+
+            // Bad arity: 1 operand instead of 2.
+            let too_few = Operation::new(
+                &mut ctx,
+                <$op>::get_concrete_op_info(),
+                vec![],
+                vec![ptr_value],
+                vec![],
+                0,
+            );
+            <$op>::new(too_few)
+                .verify(&ctx)
+                .expect_err("too few operands should fail verification");
+        }};
+    }
+
+    check_stmatrix_x1!(StmatrixM8n8X1Op);
+    check_stmatrix_x1!(StmatrixM8n8X1TransOp);
 }
