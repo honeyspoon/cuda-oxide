@@ -2331,6 +2331,74 @@ fn try_dispatch_intrinsic(
 
     match name {
         // =================================================================
+        // Approximate Math
+        // =================================================================
+        "cuda_device::approx::tanh_approx_f32" => {
+            Ok(Some(intrinsics::approx_math::emit_approx_math_unary::<
+                dialect_nvvm::ops::TanhApproxF32Op,
+            >(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::approx::ex2_approx_ftz_f32" => {
+            Ok(Some(intrinsics::approx_math::emit_approx_math_unary::<
+                dialect_nvvm::ops::Ex2ApproxFtzF32Op,
+            >(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::approx::rcp_approx_ftz_f32" => {
+            Ok(Some(intrinsics::approx_math::emit_approx_math_unary::<
+                dialect_nvvm::ops::RcpApproxFtzF32Op,
+            >(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+        "cuda_device::approx::lg2_approx_ftz_f32" => {
+            Ok(Some(intrinsics::approx_math::emit_approx_math_unary::<
+                dialect_nvvm::ops::Lg2ApproxFtzF32Op,
+            >(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+
+        // =================================================================
         // Compiler Hints
         // These intrinsics only guide optimization and do not affect semantics.
         // =================================================================

@@ -19,6 +19,7 @@
 //! use dialect_nvvm::ops::{ReadPtxSregTidXOp, Barrier0Op, ShflSyncBflyI32Op};
 //! ```
 
+mod approx_math;
 mod asm;
 pub mod atomic;
 mod cluster;
@@ -30,6 +31,7 @@ mod wgmma;
 use pliron::context::Context;
 
 // Re-export all operations for public API
+pub use approx_math::*;
 pub use asm::*;
 pub use atomic::*;
 pub use cluster::*;
@@ -43,6 +45,7 @@ pub use wgmma::*;
 /// This function registers all operation types so they can be parsed,
 /// verified, and printed. Must be called during dialect initialization.
 pub fn register(ctx: &mut Context) {
+    approx_math::register(ctx);
     atomic::register(ctx);
     asm::register(ctx);
     cluster::register(ctx);

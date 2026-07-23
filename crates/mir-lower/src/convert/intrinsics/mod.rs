@@ -70,6 +70,7 @@
 //! 3. Implement the conversion function in the appropriate module here
 //! 4. Use `call_intrinsic` for LLVM intrinsics or `inline_asm_convergent` for PTX
 
+pub mod approx_math;
 pub mod asm;
 pub mod atomic;
 pub mod basic;

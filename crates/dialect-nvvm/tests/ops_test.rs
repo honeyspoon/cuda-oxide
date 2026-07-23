@@ -72,6 +72,10 @@ fn handwritten_ops_match_reviewed_allowlist() {
     }
 
     let mut expected = [
+        ("approx_math.rs", "TanhApproxF32Op"),
+        ("approx_math.rs", "Ex2ApproxFtzF32Op"),
+        ("approx_math.rs", "RcpApproxFtzF32Op"),
+        ("approx_math.rs", "Lg2ApproxFtzF32Op"),
         ("asm.rs", "InlinePtxOp"),
         ("atomic.rs", "NvvmAtomicLoadOp"),
         ("atomic.rs", "NvvmAtomicStoreOp"),

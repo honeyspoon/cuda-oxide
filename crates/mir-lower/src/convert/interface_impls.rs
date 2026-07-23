@@ -36,8 +36,9 @@ use dialect_mir::ops::{
     MirStoreOp, MirSubOp, MirUndefOp, MirUnreachableOp, MirUnrollHintOp,
 };
 use dialect_nvvm::ops::{
-    AssertFailOp, InlinePtxOp, NvvmAtomicCmpxchgOp, NvvmAtomicLoadOp, NvvmAtomicRmwOp,
-    NvvmAtomicStoreOp, ReadPtxSregClusterIdxOp, ReadPtxSregNclusterIdOp, VprintfOp,
+    AssertFailOp, Ex2ApproxFtzF32Op, InlinePtxOp, Lg2ApproxFtzF32Op, NvvmAtomicCmpxchgOp,
+    NvvmAtomicLoadOp, NvvmAtomicRmwOp, NvvmAtomicStoreOp, RcpApproxFtzF32Op,
+    ReadPtxSregClusterIdxOp, ReadPtxSregNclusterIdOp, TanhApproxF32Op, VprintfOp,
     WgmmaMakeSmemDescOp, WgmmaMmaM64N64K16F32Bf16Op,
 };
 
@@ -1070,6 +1071,76 @@ impl MirToLlvmConversion for NvvmAtomicCmpxchgOp {
             rewriter,
             self.get_operation(),
             operands_info,
+        )
+    }
+}
+
+// ---- Approximate math ops ---------------------------------------------------
+
+#[op_interface_impl]
+impl MirToLlvmConversion for TanhApproxF32Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        _operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::approx_math::convert_approx_math_unary(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            "tanh.approx.f32",
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for Ex2ApproxFtzF32Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        _operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::approx_math::convert_approx_math_unary(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            "ex2.approx.ftz.f32",
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for RcpApproxFtzF32Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        _operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::approx_math::convert_approx_math_unary(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            "rcp.approx.ftz.f32",
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for Lg2ApproxFtzF32Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        _operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::approx_math::convert_approx_math_unary(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            "lg2.approx.ftz.f32",
         )
     }
 }
