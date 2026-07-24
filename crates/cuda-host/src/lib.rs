@@ -45,6 +45,9 @@
 //!   `#[cuda_module]`.
 //! - `cuda_launch_async!`: Low-level async launch macro retained for
 //!   migration when the `async` feature is enabled.
+//! - [`launch!`]: Convenience wrapper that isolates each `#[cuda_module]`
+//!   kernel launch in its own `unsafe` block, replacing one giant unsafe
+//!   region with per-launch safety boundaries.
 //!
 //! ## Usage
 //!
@@ -92,6 +95,7 @@ pub mod ltoir;
 mod ltoir_cache;
 pub mod tiling;
 pub mod type_id;
+pub mod launch_macro;
 
 pub use kernel_family::{
     KernelFamily, KernelFamilyBuildError, KernelFamilyId, KernelProblem, KernelSelectionCache,
