@@ -11,17 +11,29 @@ include!("generated/float.rs");
 // Simple min/max
 // =============================================================================
 //
-// Direct PTX `min.f32` / `max.f32` without the extended modifiers
-// (xorsign_abs, nan propagation, etc.) that the generated variants use.
-// These implement IEEE 754-2008 minNum/maxNum: if one operand is NaN, the
-// non-NaN operand is returned.
+// Direct PTX `min` / `max` without the extended modifiers (`.xorsign.abs`,
+// `.NaN`, `.ftz`) that the generated variants carry.
+//
+// NaN handling: plain `min`/`max` return the non-NaN operand when exactly one
+// operand is NaN, and a canonical NaN when both are. Propagating NaN instead
+// requires the `.NaN` modifier, which is what the generated `*_nan_*` variants
+// use. That non-propagating behaviour is IEEE 754-2008 `minNum`/`maxNum`; the
+// year matters, because 754-2019 withdrew those operations in favour of
+// `minimum`/`maximum`, which do propagate NaN and are not what these emit.
+//
+// Why not `f32::min`: it lowers through libdevice (`__nv_fminf`). Rerouting it
+// onto LLVM's `llvm.minnum`/`llvm.maxnum` is not a safe shortcut either, since
+// under LLVM 21 those intrinsics propagate signaling NaNs and so disagree with
+// the contract Rust documents for `f32::min`. Emitting the PTX instruction
+// directly avoids both the call and that mismatch.
 
 /// Returns the smaller of two f32 values.
 ///
 /// Maps to PTX: `min.f32`
 ///
-/// If either operand is NaN, the non-NaN value is returned (IEEE 754
-/// minNum semantics). If both are NaN, NaN is returned.
+/// If exactly one operand is NaN, the other operand is returned; if both
+/// are NaN, the result is a canonical NaN. Use the `*_nan_*` variants to
+/// propagate NaN instead.
 ///
 /// See also: [`min_xorsign_abs_f32`], [`min_nan_xorsign_abs_f32`]
 #[must_use]
@@ -44,8 +56,9 @@ pub fn fmin_f32(a: f32, b: f32) -> f32 {
 ///
 /// Maps to PTX: `max.f32`
 ///
-/// If either operand is NaN, the non-NaN value is returned (IEEE 754
-/// maxNum semantics). If both are NaN, NaN is returned.
+/// If exactly one operand is NaN, the other operand is returned; if both
+/// are NaN, the result is a canonical NaN. Use the `*_nan_*` variants to
+/// propagate NaN instead.
 ///
 /// See also: [`max_xorsign_abs_f32`], [`max_nan_xorsign_abs_f32`]
 #[must_use]
@@ -68,10 +81,12 @@ pub fn fmax_f32(a: f32, b: f32) -> f32 {
 ///
 /// Maps to PTX: `min.f64`
 ///
-/// If either operand is NaN, the non-NaN value is returned (IEEE 754
-/// minNum semantics). If both are NaN, NaN is returned.
+/// If exactly one operand is NaN, the other operand is returned; if both
+/// are NaN, the result is a canonical NaN. Use the `*_nan_*` variants to
+/// propagate NaN instead.
 ///
-/// See also: [`min_xorsign_abs_f32`], [`min_nan_xorsign_abs_f32`]
+/// The extended modifier forms (`.xorsign.abs`, `.NaN`, `.ftz`) are provided
+/// for f32 only, so there is no f64 counterpart to cross-reference.
 #[must_use]
 #[inline(always)]
 pub fn fmin_f64(a: f64, b: f64) -> f64 {
@@ -92,10 +107,12 @@ pub fn fmin_f64(a: f64, b: f64) -> f64 {
 ///
 /// Maps to PTX: `max.f64`
 ///
-/// If either operand is NaN, the non-NaN value is returned (IEEE 754
-/// maxNum semantics). If both are NaN, NaN is returned.
+/// If exactly one operand is NaN, the other operand is returned; if both
+/// are NaN, the result is a canonical NaN. Use the `*_nan_*` variants to
+/// propagate NaN instead.
 ///
-/// See also: [`max_xorsign_abs_f32`], [`max_nan_xorsign_abs_f32`]
+/// The extended modifier forms (`.xorsign.abs`, `.NaN`, `.ftz`) are provided
+/// for f32 only, so there is no f64 counterpart to cross-reference.
 #[must_use]
 #[inline(always)]
 pub fn fmax_f64(a: f64, b: f64) -> f64 {
