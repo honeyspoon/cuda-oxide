@@ -10,6 +10,28 @@ include!("generated/float.rs");
 // =========================================================================
 // Rounding intrinsics (single-instruction PTX via ptx_asm!)
 // =========================================================================
+//
+// PTX exposes exactly four float-to-integer rounding modes as a single `cvt`
+// instruction, and all four are wrapped below:
+//
+//   cvt.rmi -> toward minus infinity   (floor)
+//   cvt.rpi -> toward plus infinity    (ceil)
+//   cvt.rzi -> toward zero             (trunc)
+//   cvt.rni -> to nearest, ties to even (roundeven)
+//
+// Ties away from zero is deliberately absent: it is not one of the hardware
+// modes, so it cannot be a single instruction. `roundeven_f32` is not a
+// substitute -- the two disagree at every exact `.5` tie (2.5 rounds to 2.0
+// under ties-to-even but 3.0 under ties-away), and the difference is silent.
+// Callers that need ties-away must keep their own sequence; correcting
+// `roundeven` at ties, or `trunc(x + copysign(0.5, x))` guarded for
+// magnitudes at or above 2^23 where every f32 is already an integer and the
+// addition would round.
+//
+// Relationship to the compiler path: once floor/ceil/trunc/round_ties_even
+// are routed onto LLVM intrinsics in mir-lower, `f32::floor()` and friends
+// lower to these same `cvt` instructions, and the wrappers here become a way
+// to name the rounding mode explicitly rather than a performance win.
 
 /// Rounds `x` toward minus infinity (floor).
 ///
