@@ -5,6 +5,8 @@
 
 //! Scalar floating-point intrinsics.
 
+include!("generated/float.rs");
+
 // =============================================================================
 // Simple min/max
 // =============================================================================
@@ -20,6 +22,8 @@
 ///
 /// If either operand is NaN, the non-NaN value is returned (IEEE 754
 /// minNum semantics). If both are NaN, NaN is returned.
+///
+/// See also: [`min_xorsign_abs_f32`], [`min_nan_xorsign_abs_f32`]
 #[must_use]
 #[inline(always)]
 pub fn fmin_f32(a: f32, b: f32) -> f32 {
@@ -42,6 +46,8 @@ pub fn fmin_f32(a: f32, b: f32) -> f32 {
 ///
 /// If either operand is NaN, the non-NaN value is returned (IEEE 754
 /// maxNum semantics). If both are NaN, NaN is returned.
+///
+/// See also: [`max_xorsign_abs_f32`], [`max_nan_xorsign_abs_f32`]
 #[must_use]
 #[inline(always)]
 pub fn fmax_f32(a: f32, b: f32) -> f32 {
@@ -64,6 +70,8 @@ pub fn fmax_f32(a: f32, b: f32) -> f32 {
 ///
 /// If either operand is NaN, the non-NaN value is returned (IEEE 754
 /// minNum semantics). If both are NaN, NaN is returned.
+///
+/// See also: [`min_xorsign_abs_f32`], [`min_nan_xorsign_abs_f32`]
 #[must_use]
 #[inline(always)]
 pub fn fmin_f64(a: f64, b: f64) -> f64 {
@@ -86,6 +94,8 @@ pub fn fmin_f64(a: f64, b: f64) -> f64 {
 ///
 /// If either operand is NaN, the non-NaN value is returned (IEEE 754
 /// maxNum semantics). If both are NaN, NaN is returned.
+///
+/// See also: [`max_xorsign_abs_f32`], [`max_nan_xorsign_abs_f32`]
 #[must_use]
 #[inline(always)]
 pub fn fmax_f64(a: f64, b: f64) -> f64 {
@@ -101,5 +111,3 @@ pub fn fmax_f64(a: f64, b: f64) -> f64 {
     }
     result
 }
-
-include!("generated/float.rs");
