@@ -91,11 +91,11 @@
 pub mod embedded;
 pub mod kernel_family;
 pub mod launch;
+pub mod launch_macro;
 pub mod ltoir;
 mod ltoir_cache;
 pub mod tiling;
 pub mod type_id;
-pub mod launch_macro;
 
 pub use kernel_family::{
     KernelFamily, KernelFamilyBuildError, KernelFamilyId, KernelProblem, KernelSelectionCache,
