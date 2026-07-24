@@ -1060,7 +1060,6 @@ pub fn reduce_min_f64(mut val: f64) -> f64 {
     val
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
