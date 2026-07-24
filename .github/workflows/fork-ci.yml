@@ -1,0 +1,227 @@
+---
+# Fork-local CI: replicates the critical upstream gates that catch issues
+# before they reach maintainer review. This file must NOT be pushed to
+# upstream PR branches (the fork-guard job below checks for leaks).
+#
+# Gates replicated:
+#   - fmt.yml:        formatting across all 3 workspaces
+#   - clippy.yml:     lint violations (workspace + rustc-codegen-cuda + examples)
+#   - unit-tests.yml: package test matrix (non-CUDA subset) + generated intrinsics
+#
+# Gates skipped (unlikely fork failure modes or GPU-dependent):
+#   - examples-compile.yml: needs `cargo oxide build` + CUDA toolkit
+#   - naming-guard.yml:     we don't touch reserved symbol constants
+#   - status-guard.yml:     we don't add error examples
+#   - cargo-deny.yml:       license checking
+name: Fork CI
+
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: fork-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ===================================================================
+  # Formatting (replicates upstream fmt.yml)
+  # ===================================================================
+  fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+
+      - name: Install rustfmt for the pinned nightly
+        run: rustup component add rustfmt
+
+      - name: Check root workspace formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check rustc-codegen-cuda formatting
+        run: cargo fmt --all -- --check
+        working-directory: crates/rustc-codegen-cuda
+
+      - name: Check example crate formatting
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          manifests=(crates/rustc-codegen-cuda/examples/**/Cargo.toml)
+          ((${#manifests[@]} > 0))
+          for manifest in "${manifests[@]}"; do
+            example_dir="$(dirname "$manifest")"
+            echo "::group::cargo fmt --check ($example_dir)"
+            cargo fmt --manifest-path "$manifest" -- --check
+            echo "::endgroup::"
+          done
+
+  # ===================================================================
+  # Clippy (replicates upstream clippy.yml)
+  # ===================================================================
+  clippy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        id: cuda-toolkit
+        with:
+          cuda: "13.1.1"
+          method: network
+          sub-packages: '["nvcc", "cudart-dev"]'
+          non-cuda-sub-packages: '["libcurand-dev"]'
+
+      - name: Run clippy (workspace crates)
+        env:
+          CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Run clippy (rustc-codegen-cuda)
+        env:
+          CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/clippy-shared-target
+        working-directory: crates/rustc-codegen-cuda
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run clippy (rustc-codegen-cuda examples)
+        env:
+          CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/clippy-shared-target
+        run: |
+          set -e
+          for ex in crates/rustc-codegen-cuda/examples/*/; do
+            if [ ! -f "$ex/Cargo.toml" ]; then continue; fi
+            name=$(basename "$ex")
+            echo "::group::clippy: $name"
+            (cd "$ex" && cargo clippy --all-targets -- -D warnings)
+            echo "::endgroup::"
+          done
+
+  # ===================================================================
+  # Unit tests (non-CUDA subset of upstream unit-tests.yml)
+  # ===================================================================
+  unit-tests:
+    name: cargo test -p ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: cuda-intrinsics-gen
+          - package: cuda-intrinsics
+          - package: llvm-export
+          - package: dialect-mir
+          - package: dialect-nvvm
+          - package: mir-importer
+          - package: mir-lower
+          - package: mir-transforms
+          - package: nvvm-transforms
+          - package: oxide-artifacts
+          - package: reserved-oxide-symbols
+          - package: cuda-device
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+
+      - name: Run crate unit tests
+        run: |
+          sysroot="$(rustc --print sysroot)"
+          export LIBRARY_PATH="${sysroot}/lib:${LIBRARY_PATH:-}"
+          export LD_LIBRARY_PATH="${sysroot}/lib:${LD_LIBRARY_PATH:-}"
+          cargo test -p ${{ matrix.package }} --all-targets
+
+  # ===================================================================
+  # Generated intrinsics (replicates upstream generated-intrinsics job)
+  #
+  # This is the critical gate that catches stale target tables when
+  # adding new auto-gen intrinsics through the scalar_math pipeline.
+  # ===================================================================
+  generated-intrinsics:
+    name: generated intrinsics are current and ABI-compatible
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Clone repository with ABI history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install rustfmt for the pinned nightly
+        run: rustup component add rustfmt
+
+      - name: Check generated intrinsic outputs
+        run: cargo run -p cuda-intrinsics-gen -- check
+
+      - name: Probe every generated LLVM-NVPTX route
+        run: |
+          # Stock runners do not carry the recorded CUDA 13.3 ptxas binary.
+          # This still checks the pinned llc identity and exact emitted PTX.
+          cargo run -p cuda-intrinsics-gen -- probe --all --skip-terminal
+
+      - name: Check append-only intrinsic ABI ledger
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base_ref="${{ github.event.pull_request.base.sha }}"
+          else
+            before="${{ github.event.before }}"
+            zero="0000000000000000000000000000000000000000"
+            if [ -n "${before}" ] && [ "${before}" != "${zero}" ] && git cat-file -e "${before}^{commit}"; then
+              base_ref="${before}"
+            elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+              base_ref="HEAD^"
+            else
+              base_ref="HEAD"
+            fi
+          fi
+          cargo run -p cuda-intrinsics-gen -- check-abi-history --base-ref "${base_ref}"
+
+  # ===================================================================
+  # Fork guard (prevents fork-only files from leaking to upstream PRs
+  # and catches cross-branch contamination from bad rebases)
+  # ===================================================================
+  fork-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check lowering_test.rs not truncated by rebase
+        run: |
+          set -euo pipefail
+          file="crates/mir-lower/tests/lowering_test.rs"
+          lines=$(wc -l < "$file")
+          echo "lowering_test.rs: $lines lines"
+          # This file is consistently >2000 lines. A rebase that
+          # truncates it causes cascading parse errors in all example
+          # crate fmt checks.
+          if [ "$lines" -lt 500 ]; then
+            echo "::error file=$file::lowering_test.rs appears truncated ($lines lines, expected >2000)"
+            exit 1
+          fi
+
+      - name: Verify dialect-nvvm ops/mod.rs has no orphaned registrations
+        run: |
+          set -euo pipefail
+          # Every module declared in ops/mod.rs must exist as a file or directory.
+          mod_file="crates/dialect-nvvm/src/ops/mod.rs"
+          while IFS= read -r mod_name; do
+            if [ ! -f "crates/dialect-nvvm/src/ops/${mod_name}.rs" ] && \
+               [ ! -d "crates/dialect-nvvm/src/ops/${mod_name}" ]; then
+              echo "::error file=$mod_file::ops/mod.rs declares module '$mod_name' but no file or directory exists"
+              exit 1
+            fi
+          done < <(grep -oP '(?:pub )?mod \K\w+' "$mod_file" || true)
