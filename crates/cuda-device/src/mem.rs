@@ -41,6 +41,7 @@
 /// - `ptr` must be a valid device pointer to at least 2 contiguous `f32` values.
 /// - `ptr` must be aligned to 8 bytes (natural alignment for a 64-bit load).
 /// - The memory region must be readable by the calling thread.
+#[must_use]
 #[inline(always)]
 pub unsafe fn load_v2_f32(ptr: *const f32) -> (f32, f32) {
     let v0: f32;
@@ -66,6 +67,7 @@ pub unsafe fn load_v2_f32(ptr: *const f32) -> (f32, f32) {
 /// - `ptr` must be a valid device pointer to at least 4 contiguous `f32` values.
 /// - `ptr` must be aligned to 16 bytes (natural alignment for a 128-bit load).
 /// - The memory region must be readable by the calling thread.
+#[must_use]
 #[inline(always)]
 pub unsafe fn load_v4_f32(ptr: *const f32) -> (f32, f32, f32, f32) {
     let v0: f32;
@@ -153,6 +155,7 @@ pub unsafe fn store_v4_f32(ptr: *mut f32, v0: f32, v1: f32, v2: f32, v3: f32) {
 /// - `ptr` must be a valid device pointer to at least 2 contiguous `u32` values.
 /// - `ptr` must be aligned to 8 bytes (natural alignment for a 64-bit load).
 /// - The memory region must be readable by the calling thread.
+#[must_use]
 #[inline(always)]
 pub unsafe fn load_v2_u32(ptr: *const u32) -> (u32, u32) {
     let v0: u32;
@@ -178,6 +181,7 @@ pub unsafe fn load_v2_u32(ptr: *const u32) -> (u32, u32) {
 /// - `ptr` must be a valid device pointer to at least 4 contiguous `u32` values.
 /// - `ptr` must be aligned to 16 bytes (natural alignment for a 128-bit load).
 /// - The memory region must be readable by the calling thread.
+#[must_use]
 #[inline(always)]
 pub unsafe fn load_v4_u32(ptr: *const u32) -> (u32, u32, u32, u32) {
     let v0: u32;
@@ -247,6 +251,64 @@ pub unsafe fn store_v4_u32(ptr: *mut u32, v0: u32, v1: u32, v2: u32, v3: u32) {
             in("r") v1,
             in("r") v2,
             in("r") v3,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// f64 vectorized loads
+// ---------------------------------------------------------------------------
+
+/// Load two consecutive `f64` values with a single 128-bit global memory
+/// transaction.
+///
+/// Emits `ld.global.v2.f64 {%0, %1}, [%2];`
+///
+/// # Safety
+///
+/// - `ptr` must be a valid device pointer to at least 2 contiguous `f64` values.
+/// - `ptr` must be aligned to 16 bytes (natural alignment for a 128-bit load).
+/// - The memory region must be readable by the calling thread.
+#[must_use]
+#[inline(always)]
+pub unsafe fn load_v2_f64(ptr: *const f64) -> (f64, f64) {
+    let v0: f64;
+    let v1: f64;
+    unsafe {
+        crate::ptx_asm!(
+            "ld.global.v2.f64 {%0, %1}, [%2];",
+            out("=d") v0,
+            out("=d") v1,
+            in("l") ptr,
+        );
+    }
+    (v0, v1)
+}
+
+// ---------------------------------------------------------------------------
+// f64 vectorized stores
+// ---------------------------------------------------------------------------
+
+/// Store two `f64` values with a single 128-bit global memory transaction.
+///
+/// Emits `st.global.v2.f64 [%0], {%1, %2};`
+///
+/// # Safety
+///
+/// - `ptr` must be a valid device pointer with room for at least 2 contiguous
+///   `f64` values.
+/// - `ptr` must be aligned to 16 bytes (natural alignment for a 128-bit store).
+/// - The memory region must be writable by the calling thread.
+/// - No other thread may concurrently read or write the same memory without
+///   explicit synchronization.
+#[inline(always)]
+pub unsafe fn store_v2_f64(ptr: *mut f64, v0: f64, v1: f64) {
+    unsafe {
+        crate::ptx_asm!(
+            "st.global.v2.f64 [%0], {%1, %2};",
+            in("l") ptr,
+            in("d") v0,
+            in("d") v1,
         );
     }
 }
