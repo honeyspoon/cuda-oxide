@@ -15,6 +15,7 @@ pub use cuda_macros::{
 pub mod async_copy;
 pub mod atomic;
 pub mod barrier;
+pub mod block;
 pub mod bf16x2;
 pub mod clc;
 pub mod cluster;
