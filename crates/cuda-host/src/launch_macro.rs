@@ -34,6 +34,21 @@
 /// the unsafe boundary explicit at each launch site rather than one
 /// all-encompassing block.
 ///
+/// # Accepted call shapes
+///
+/// The launch is captured as an expression, so the module can be reached any
+/// way, not just through a bare local. All of these work:
+///
+/// ```rust,ignore
+/// launch!(module.kernel(&stream, cfg, &buf))?;           // local
+/// launch!(self.module.kernel(&stream, cfg, &buf))?;      // struct field
+/// launch!(self.modules[i].kernel(&stream, cfg, &buf))?;  // indexed
+/// launch!((&self.module).kernel(&stream, cfg, &buf))?;   // parenthesized
+/// ```
+///
+/// The struct-field form matters in practice: a forward pass usually keeps its
+/// loaded module in `self`, which is exactly the case Gap #5 describes.
+///
 /// # Difference from `cuda_launch!`
 ///
 /// [`cuda_launch!`] is a low-level macro that marshals raw kernel names and
@@ -83,11 +98,17 @@
 /// ```
 #[macro_export]
 macro_rules! launch {
-    ($module:ident . $kernel:ident ( $($args:expr),* $(,)? )) => {
+    // The launch is captured as a single expression rather than as
+    // `$module:ident . $kernel:ident (...)`. An `ident` receiver matches only a
+    // bare local, so the common case of holding the loaded module in a struct
+    // field (`self.module.kernel(..)`) failed to match at all, with a
+    // "no rules expected `.`" error. Taking an expression accepts every
+    // receiver shape: locals, fields, indexes, and parenthesized expressions.
+    ($call:expr) => {
         // SAFETY: Caller is responsible for the kernel launch invariants
         // documented on this macro. Each `launch!` invocation is an
         // independent unsafe boundary.
-        unsafe { $module.$kernel( $($args),* ) }
+        unsafe { $call }
     };
 }
 
@@ -152,5 +173,40 @@ mod tests {
         let module = FakeModule;
         let result = launch!(module.kern(1, 2,));
         assert!(result.is_ok());
+    }
+
+    /// Verify receivers other than a bare local.
+    ///
+    /// These are the shapes an `ident` receiver could not match: matching on
+    /// `$module:ident . $kernel:ident (..)` rejected `host.module.kern(..)`
+    /// outright with "no rules expected `.`". A forward pass normally keeps its
+    /// loaded module in a struct field, so this is the common case, not an edge
+    /// case.
+    #[test]
+    fn test_launch_macro_accepts_non_ident_receivers() {
+        struct FakeModule;
+
+        impl FakeModule {
+            unsafe fn kern(&self, a: i32) -> Result<i32, String> {
+                Ok(a * 2)
+            }
+        }
+
+        struct Host {
+            module: FakeModule,
+            modules: Vec<FakeModule>,
+        }
+
+        let host = Host {
+            module: FakeModule,
+            modules: vec![FakeModule],
+        };
+
+        // Struct field receiver.
+        assert_eq!(launch!(host.module.kern(21)), Ok(42));
+        // Indexed receiver.
+        assert_eq!(launch!(host.modules[0].kern(50)), Ok(100));
+        // Parenthesized receiver.
+        assert_eq!(launch!((&host.module).kern(5)), Ok(10));
     }
 }
