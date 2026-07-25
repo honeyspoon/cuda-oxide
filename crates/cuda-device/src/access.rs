@@ -30,10 +30,24 @@
 //! # Scope
 //!
 //! This answers "what shape does this width need". It does not decide whether
-//! the width is *achievable* for a given element type; that is Law 2, and it
-//! depends on the type's alignment. A plan with `align = 16` is only realised if
-//! the element type is actually 16-byte aligned - see the `vectorization`
-//! example.
+//! the width is *achievable*, which depends on the element type and, for loads,
+//! on how the value is used.
+//!
+//! Measured on sm_86, with the element type 16-byte aligned throughout:
+//!
+//! ```text
+//! how the element is used                     LDG          STG
+//! never decomposed                            LDG.E.128    STG.E.128
+//! lanes read, whole value assembled+stored    LDG.E x4     STG.E.128
+//! lanes read, scalar stored                   LDG.E x4     STG.E
+//! ```
+//!
+//! So `align` is a necessary condition, and for loads not a sufficient one:
+//! touching individual lanes lets the optimiser split the local apart and load
+//! the lanes separately whatever the alignment. Stores have no such condition.
+//! A plan therefore describes the shape a width *needs*, not a width the kernel
+//! is guaranteed to get - the data has to move as whole elements as well.
+//! See the `vectorization` example for the alignment half.
 
 /// One 32-bit transaction (`LDG.E` / `STG.E`).
 pub const TXN_32: usize = 4;
@@ -48,6 +62,9 @@ pub struct AccessPlan {
     /// Bytes moved per thread per instruction.
     pub txn_bytes: usize,
     /// Element type alignment required to reach `txn_bytes`.
+    ///
+    /// Necessary, and for loads not sufficient - see the module's *Scope*
+    /// section.
     pub align: usize,
     /// Elements each thread moves per instruction.
     pub elems_per_thread: usize,
