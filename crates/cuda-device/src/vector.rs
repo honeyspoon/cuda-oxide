@@ -197,10 +197,10 @@ fn vector_len<V: Vector>(elems: usize, addr: usize) -> Option<usize> {
     if V::LANES == 0 || size_of::<V::Elem>() == 0 {
         return None;
     }
-    if elems % V::LANES != 0 {
+    if !elems.is_multiple_of(V::LANES) {
         return None;
     }
-    if addr % align_of::<V>() != 0 {
+    if !addr.is_multiple_of(align_of::<V>()) {
         return None;
     }
     Some(elems / V::LANES)
@@ -308,7 +308,7 @@ mod tests {
         }
         for off in [1usize, 2, 3, 5, 6, 7] {
             let tail = &flat[off..];
-            if tail.len() % 4 != 0 {
+            if !tail.len().is_multiple_of(4) {
                 continue; // rejected on length, not the point here
             }
             assert!(
