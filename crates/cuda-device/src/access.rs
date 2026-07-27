@@ -85,7 +85,7 @@ impl AccessPlan {
     /// and `K = 32`, the minimum `M` is 32.
     #[must_use]
     pub const fn min_extent(&self, other: usize) -> Option<usize> {
-        if other == 0 || self.elems_per_block % other != 0 {
+        if other == 0 || !self.elems_per_block.is_multiple_of(other) {
             return None;
         }
         Some(self.elems_per_block / other)
@@ -95,7 +95,9 @@ impl AccessPlan {
     /// accesses at this width.
     #[must_use]
     pub const fn fits_tile(&self, tile_elems: usize) -> bool {
-        self.elems_per_block != 0 && tile_elems != 0 && tile_elems % self.elems_per_block == 0
+        self.elems_per_block != 0
+            && tile_elems != 0
+            && tile_elems.is_multiple_of(self.elems_per_block)
     }
 
     /// Block-wide accesses needed to move a tile of `tile_elems`.
@@ -146,7 +148,7 @@ pub const fn plan_for_elem_size(
     }
     // A transaction has to be a whole number of elements. An f32 cannot do a
     // 6-byte access, and an f64 cannot do a 32-bit one.
-    if txn_bytes % elem_size != 0 {
+    if !txn_bytes.is_multiple_of(elem_size) {
         return None;
     }
     let elems_per_thread = txn_bytes / elem_size;
@@ -174,10 +176,10 @@ pub const fn widest<T>(tile_elems: usize, threads: usize) -> Option<AccessPlan> 
     let candidates = [TXN_128, TXN_64, TXN_32];
     let mut i = 0;
     while i < candidates.len() {
-        if let Some(p) = plan_for_elem_size(elem_size, candidates[i], threads) {
-            if p.fits_tile(tile_elems) {
-                return Some(p);
-            }
+        if let Some(p) = plan_for_elem_size(elem_size, candidates[i], threads)
+            && p.fits_tile(tile_elems)
+        {
+            return Some(p);
         }
         i += 1;
     }
