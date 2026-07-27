@@ -6,6 +6,11 @@
 #![feature(f16)]
 #![no_std]
 
+// `ptx_asm!` expands to absolute `cuda_device::ptx::__ptx_asm_*` marker paths for
+// downstream kernel crates; those do not resolve inside this crate. Aliasing the
+// crate to its own name lets modules here use the macro too.
+extern crate self as cuda_device;
+
 pub use cuda_macros::{
     cluster_launch, constant, convergent, cooperative_launch, cuda_module, device, gpu_printf,
     kernel, launch_bounds, launch_contract, ptx_asm, pure, readonly,
