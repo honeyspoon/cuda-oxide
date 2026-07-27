@@ -861,10 +861,10 @@ fn chunk_cast_len(bytes: usize, addr: usize, elem_size: usize, align: usize) -> 
     if elem_size == 0 || align == 0 {
         return None;
     }
-    if bytes % elem_size != 0 {
+    if !bytes.is_multiple_of(elem_size) {
         return None;
     }
-    if addr % align != 0 {
+    if !addr.is_multiple_of(align) {
         return None;
     }
     Some(bytes / elem_size)
