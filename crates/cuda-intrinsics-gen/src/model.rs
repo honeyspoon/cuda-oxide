@@ -2332,6 +2332,16 @@ pub enum WarpBarrierMemoryOrdering {
 pub struct WarpShuffle {
     pub mode: WarpShuffleMode,
     pub value_kind: WarpShuffleValueKind,
+    /// Whether this is the `d|p` form, which also yields the range predicate.
+    ///
+    /// PTX writes the destination as `$dst|$pred`; the LLVM intrinsic is the
+    /// `*p`-suffixed sibling returning `{value, i1}`. The predicate reports
+    /// exactly the fact [`WarpShuffleSourceLane`] already names: whether the
+    /// computed source lane fell inside the clamp segment. It is *not* an
+    /// activity or convergence signal - a partner outside the member mask still
+    /// sets it.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub predicate: bool,
     pub participation: WarpShuffleParticipation,
     pub legacy_pre_sm70: PreSm70MemberMaskRule,
     pub source_lane: WarpShuffleSourceLane,

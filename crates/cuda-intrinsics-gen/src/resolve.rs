@@ -2532,11 +2532,16 @@ fn selection_matches_policy(
         let Some(shuffle) = &policy.warp_shuffle else {
             return false;
         };
-        let recipe = warp_shuffle_recipe(shuffle.mode, shuffle.value_kind);
+        let recipe = warp_shuffle_recipe(shuffle.mode, shuffle.value_kind, shuffle.predicate);
         return selection.asm
             == format!(
-                "shfl.sync.{}.b32 \t$dst, $src, $offset, $mask, $threadmask;",
-                recipe.ptx_mode
+                "shfl.sync.{}.b32 \t{}, $src, $offset, $mask, $threadmask;",
+                recipe.ptx_mode,
+                if shuffle.predicate {
+                    "$dst|$pred"
+                } else {
+                    "$dst"
+                }
             )
             && selection.constraints.is_empty();
     }
@@ -9009,7 +9014,7 @@ fn validate_warp_shuffle_policy(
         .warp_shuffle
         .as_ref()
         .with_context(|| format!("{} has no closed warp-shuffle contract", policy.id))?;
-    let recipe = warp_shuffle_recipe(shuffle.mode, shuffle.value_kind);
+    let recipe = warp_shuffle_recipe(shuffle.mode, shuffle.value_kind, shuffle.predicate);
     ensure!(
         shuffle.participation
             == WarpShuffleParticipation::ExecutingLaneNamedAllNamedLanesSameInstructionAndMask
@@ -9055,11 +9060,18 @@ fn validate_warp_shuffle_policy(
         "{} warp-shuffle identity does not match its closed mode and value recipe",
         policy.id
     );
+    // The `d|p` form returns the range predicate alongside the value, so its raw
+    // Rust result is a tuple. Arguments are unchanged - only the result widens.
+    let expected_rust_result: String = if shuffle.predicate {
+        format!("({}, bool)", recipe.rust_value)
+    } else {
+        recipe.rust_value.to_string()
+    };
     ensure!(
         policy.rust_module == "warp"
             && policy.rust_name == recipe.rust_name
             && policy.rust_arguments == ["u32", recipe.rust_value, "u32"]
-            && policy.rust_result == recipe.rust_value
+            && policy.rust_result == expected_rust_result
             && !policy.safe
             && policy.must_use
             && policy.safe_allowlist_reason.is_none()
@@ -9069,16 +9081,23 @@ fn validate_warp_shuffle_policy(
         "{} must preserve its unsafe must-use warp-shuffle raw API and compatibility path",
         policy.id
     );
+    // `d|p` yields `{value, i1}` at both the dialect and LLVM boundary; the
+    // operand side is identical to the plain form.
+    let expected_results: Vec<&str> = if shuffle.predicate {
+        vec![recipe.dialect_value, "i1"]
+    } else {
+        vec![recipe.dialect_value]
+    };
     ensure!(
         policy.dialect_op_type == recipe.dialect_op_type
             && policy.dialect_op_name == recipe.dialect_op_name
             && policy.dialect_operands == ["i32", recipe.dialect_value, "i32"]
-            && policy.dialect_results == [recipe.dialect_value]
+            && policy.dialect_results == expected_results
             && policy.lowering == recipe.lowering
             && match recipe.source {
                 WarpShuffleRecipeSource::LlvmImported { .. } => {
                     policy.llvm_arguments == ["i32", recipe.dialect_value, "i32", "i32"]
-                        && policy.llvm_results == [recipe.dialect_value]
+                        && policy.llvm_results == expected_results
                 }
                 WarpShuffleRecipeSource::PtxNative { .. } => {
                     policy.llvm_arguments.is_empty() && policy.llvm_results.is_empty()
@@ -9094,7 +9113,7 @@ fn validate_warp_shuffle_policy(
             && policy.execution_scope == "warp"
             && policy.minimum_ptx == "6.0"
             && policy.minimum_sm.as_deref() == Some("sm_30")
-            && policy.ptx_result == recipe.rust_value
+            && policy.ptx_result == expected_rust_result
             && policy.targets == "all",
         "{} warp-shuffle effects, carrier, or target floor disagree with its recipe",
         policy.id
@@ -9109,15 +9128,22 @@ fn validate_warp_shuffle_policy(
         policy.id
     );
     if let Some(declaration) = declaration {
+        // The `*p` siblings are not surfaced as clang/NVVM builtins - CUDA C has
+        // no `__shfl_sync` spelling that returns the predicate - so they carry
+        // only the TableGen pattern classes. Effects are identical.
+        let expected_classes: &[&str] = if shuffle.predicate {
+            &["SDPatternOperator", "Intrinsic"]
+        } else {
+            &[
+                "ClangBuiltin",
+                "NVVMBuiltin",
+                "SDPatternOperator",
+                "Intrinsic",
+            ]
+        };
         ensure!(
             matches!(recipe.source, WarpShuffleRecipeSource::LlvmImported { .. })
-                && declaration.classes
-                    == [
-                        "ClangBuiltin",
-                        "NVVMBuiltin",
-                        "SDPatternOperator",
-                        "Intrinsic"
-                    ]
+                && declaration.classes == expected_classes
                 && declaration.properties
                     == [
                         "IntrConvergent",
@@ -9154,9 +9180,16 @@ fn validate_warp_shuffle_policy(
         "{} mixes another generated-family contract with warp_shuffle",
         policy.id
     );
+    // `d|p` writes the destination and the predicate as a single operand slot,
+    // spelled `$dst|$pred`; every source operand is unchanged.
+    let destination = if shuffle.predicate {
+        OperandPattern::RegisterPredicatePair
+    } else {
+        OperandPattern::Register
+    };
     let expected_operands = match recipe.adapter {
         WarpShuffleAdapter::MaskValueLaneOrDeltaInsertClamp => vec![
-            OperandPattern::Register,
+            destination,
             OperandPattern::Register,
             OperandPattern::RegisterOrImmediate,
             OperandPattern::Exact {
@@ -9234,8 +9267,13 @@ fn validate_warp_shuffle_policy(
             policy.id
         );
         let expected_asm = format!(
-            "shfl.sync.{}.b32 \t$dst, $src, $offset, $mask, $threadmask;",
-            recipe.ptx_mode
+            "shfl.sync.{}.b32 \t{}, $src, $offset, $mask, $threadmask;",
+            recipe.ptx_mode,
+            if shuffle.predicate {
+                "$dst|$pred"
+            } else {
+                "$dst"
+            }
         );
         for selection in &declaration.selections {
             ensure!(
@@ -9283,10 +9321,151 @@ struct WarpShuffleRecipe {
     backend_mechanism: BackendLoweringMechanism,
 }
 
-fn warp_shuffle_recipe(
+/// Identity for the `d|p` form, which returns the range predicate alongside the
+/// value.
+///
+/// Operand assembly is identical to the plain form, so the adapter and clamp are
+/// shared; only the LLVM sibling (`*p`, returning `{value, i1}`) and the emitted
+/// names differ. There is no `i64` predicate sibling in the pinned metadata -
+/// LLVM ships `shfl.sync.*.{i32,f32}p` only - so `i64` is rejected rather than
+/// silently synthesised.
+fn warp_shuffle_predicate_recipe(
     mode: WarpShuffleMode,
     value_kind: WarpShuffleValueKind,
 ) -> WarpShuffleRecipe {
+    let (mode_key, ptx_mode, clamp, llvm_mode) = match mode {
+        WarpShuffleMode::Idx => ("idx", "idx", 31, "idx"),
+        WarpShuffleMode::Bfly => ("bfly", "bfly", 31, "bfly"),
+        WarpShuffleMode::Down => ("down", "down", 31, "down"),
+        WarpShuffleMode::Up => ("up", "up", 0, "up"),
+    };
+    // `id`/`rust_name` mirror the plain sibling exactly, plus `_pred`, so each
+    // new function reads as its existing counterpart. The u32 forms carry no
+    // type infix and the indexed form carries no mode infix, matching `warp.rs`.
+    let (id, abi_id, value_key, rust_value, dialect_value, type_infix, llvm_suffix) =
+        match (mode, value_kind) {
+            (WarpShuffleMode::Idx, WarpShuffleValueKind::I32) => (
+                "shuffle_sync_pred",
+                "i0830",
+                "i32",
+                "u32",
+                "i32",
+                "I32",
+                "i32p",
+            ),
+            (WarpShuffleMode::Bfly, WarpShuffleValueKind::I32) => (
+                "shuffle_xor_sync_pred",
+                "i0831",
+                "i32",
+                "u32",
+                "i32",
+                "I32",
+                "i32p",
+            ),
+            (WarpShuffleMode::Down, WarpShuffleValueKind::I32) => (
+                "shuffle_down_sync_pred",
+                "i0832",
+                "i32",
+                "u32",
+                "i32",
+                "I32",
+                "i32p",
+            ),
+            (WarpShuffleMode::Up, WarpShuffleValueKind::I32) => (
+                "shuffle_up_sync_pred",
+                "i0833",
+                "i32",
+                "u32",
+                "i32",
+                "I32",
+                "i32p",
+            ),
+            (WarpShuffleMode::Idx, WarpShuffleValueKind::F32) => (
+                "shuffle_f32_sync_pred",
+                "i0834",
+                "f32",
+                "f32",
+                "f32",
+                "F32",
+                "f32p",
+            ),
+            (WarpShuffleMode::Bfly, WarpShuffleValueKind::F32) => (
+                "shuffle_xor_f32_sync_pred",
+                "i0835",
+                "f32",
+                "f32",
+                "f32",
+                "F32",
+                "f32p",
+            ),
+            (WarpShuffleMode::Down, WarpShuffleValueKind::F32) => (
+                "shuffle_down_f32_sync_pred",
+                "i0836",
+                "f32",
+                "f32",
+                "f32",
+                "F32",
+                "f32p",
+            ),
+            (WarpShuffleMode::Up, WarpShuffleValueKind::F32) => (
+                "shuffle_up_f32_sync_pred",
+                "i0837",
+                "f32",
+                "f32",
+                "f32",
+                "F32",
+                "f32p",
+            ),
+            (_, WarpShuffleValueKind::I64) => panic!(
+                "shfl.sync has no i64 predicate sibling in the pinned metadata; \
+                 only `shfl.sync.*.{{i32,f32}}p` are imported"
+            ),
+        };
+    WarpShuffleRecipe {
+        id,
+        abi_id,
+        operation_key: leak(format!("warp.shuffle.sync.{mode_key}.{value_key}.pred")),
+        source: WarpShuffleRecipeSource::LlvmImported {
+            source_record: leak(format!("int_nvvm_shfl_sync_{llvm_mode}_{llvm_suffix}")),
+            llvm_symbol: leak(format!("llvm.nvvm.shfl.sync.{llvm_mode}.{llvm_suffix}")),
+        },
+        rust_name: id,
+        rust_value,
+        dialect_value,
+        dialect_op_type: leak(format!(
+            "ShflSync{}{type_infix}PredOp",
+            capitalize(mode_key)
+        )),
+        dialect_op_name: leak(format!("nvvm.shfl_sync_{mode_key}_{value_key}_pred")),
+        ptx_mode,
+        clamp,
+        adapter: WarpShuffleAdapter::MaskValueLaneOrDeltaInsertClamp,
+        operand_encoding: WarpShuffleOperandEncoding::RegisterOrImmediate,
+        lowering: "generated_warp_shuffle",
+        backend_mechanism: BackendLoweringMechanism::TypedNvvm,
+    }
+}
+
+fn leak(value: String) -> &'static str {
+    Box::leak(value.into_boxed_str())
+}
+
+fn capitalize(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn warp_shuffle_recipe(
+    mode: WarpShuffleMode,
+    value_kind: WarpShuffleValueKind,
+    predicate: bool,
+) -> WarpShuffleRecipe {
+    if predicate {
+        return warp_shuffle_predicate_recipe(mode, value_kind);
+    }
     match (mode, value_kind) {
         (WarpShuffleMode::Idx, WarpShuffleValueKind::I32) => WarpShuffleRecipe {
             id: "shuffle_sync",
@@ -27384,7 +27563,7 @@ mod tests {
         mode: WarpShuffleMode,
         value_kind: WarpShuffleValueKind,
     ) -> OverlayIntrinsic {
-        let recipe = warp_shuffle_recipe(mode, value_kind);
+        let recipe = warp_shuffle_recipe(mode, value_kind, false);
         let mut record = policy();
         record.id = recipe.id.into();
         record.abi_id = recipe.abi_id.into();
@@ -27461,6 +27640,7 @@ mod tests {
         record.warp_shuffle = Some(crate::model::WarpShuffle {
             mode,
             value_kind,
+            predicate: false,
             participation:
                 WarpShuffleParticipation::ExecutingLaneNamedAllNamedLanesSameInstructionAndMask,
             legacy_pre_sm70: PreSm70MemberMaskRule::AllNamedLanesConvergedAndOnlyNamedLanesActive,
@@ -27502,7 +27682,7 @@ mod tests {
         mode: WarpShuffleMode,
         value_kind: WarpShuffleValueKind,
     ) -> ImportedIntrinsic {
-        let recipe = warp_shuffle_recipe(mode, value_kind);
+        let recipe = warp_shuffle_recipe(mode, value_kind, false);
         let WarpShuffleRecipeSource::LlvmImported {
             source_record,
             llvm_symbol,
