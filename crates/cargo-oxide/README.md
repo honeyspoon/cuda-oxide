@@ -58,6 +58,8 @@ cargo oxide setup                   # explicitly build the codegen backend
 | `--device-cfg <NAME>`        | build/test passthrough           | Append `--cfg NAME` to rustflags                |
 | `-v, --verbose`              | run, sanitize, build, test, emit-ltoir | Show detailed compilation output           |
 | `--no-fmad`                  | run, sanitize, build, emit-ltoir, pipeline | Keep ordinary multiply and add/subtract operations separate |
+| `--lineinfo`                 | run, sanitize, build, inspect, emit-ltoir, pipeline | Emit device line-number info for profilers (nvcc `-lineinfo`) |
+| `--device-debug`             | run, sanitize, build, inspect, emit-ltoir, pipeline | Emit full device debug info; disables libNVVM optimization (nvcc `-G`) |
 | `--async`                    | new                              | Use the async template                          |
 | `--cgdb`                     | debug                            | Use cgdb instead of cuda-gdb                    |
 | `--tui`                      | debug                            | Use GDB's TUI interface                         |
@@ -76,6 +78,21 @@ For NVVM IR and LTOIR, cuda-oxide records the policy in matching `.options`
 and versioned `.target` files and passes `-fma=0` through libNVVM and
 nvJitLink. Keep both sidecars with the artifact when another build system
 consumes it.
+
+`--lineinfo` and `--device-debug` select the device debug policy, mirroring
+nvcc's `-lineinfo` and `-G`. `--lineinfo` preserves source line mappings with
+optimization intact and reaches nvJitLink as `-lineinfo`; `--device-debug` emits
+full debug information and additionally passes `-g` with `-opt=0` to libNVVM, so
+device optimization is disabled. Asking for both yields full debug, because full
+debug already carries line tables.
+
+Both are equivalent to `CUDA_OXIDE_DEBUG=line` and `CUDA_OXIDE_DEBUG=full`, and
+an explicit flag outranks that variable. Omitting the flags exports nothing
+rather than `off`, so an absent flag never cancels a debug level the environment
+or `cuda-oxide.toml` already requested. Because the policy changes what the CUDA
+compiler stages are asked to do, it participates in the codegen fingerprint:
+switching it rebuilds device code instead of reusing artifacts compiled under a
+different policy.
 
 `--materialize-cubin` moves the remaining libNVVM and nvJitLink work into the
 host build. The executable embeds a native cubin, so deployment does not need
