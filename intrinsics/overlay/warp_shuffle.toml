@@ -482,3 +482,44 @@ backend_lowerings = [
 warp_shuffle = { mode = "up", value_kind = "i64", participation = "executing_lane_named_all_named_lanes_same_instruction_and_mask", legacy_pre_sm70 = "all_named_lanes_converged_and_only_named_lanes_active", source_lane = "in_range_source_active_and_named_out_of_range_copies_self", adapter = "mask_value_lane_or_delta_split_i64_low_high_b32_insert_clamp_reassemble", clamp = 0, lane_encoding = "register_only", mask_encoding = "register_only" }
 expected_ptx = { mnemonic = "shfl", modifiers = ["sync", "up", "b32"], operands = [{ kind = "exact", value = "lo" }, { kind = "exact", value = "lo" }, { kind = "register" }, { kind = "exact", value = "0" }, { kind = "register" }] }
 summary = "Read a 64-bit value from a lower named lane using two 32-bit shuffles."
+
+[[intrinsic]]
+id = "shuffle_sync_pred"
+abi_id = "i0830"
+operation_key = "warp.shuffle.sync.idx.i32.pred"
+family = "warp_shuffle"
+source_record = "int_nvvm_shfl_sync_idx_i32p"
+rust_module = "warp"
+rust_name = "shuffle_sync_pred"
+rust_arguments = ["u32", "u32", "u32"]
+rust_result = "(u32, bool)"
+safe = false
+must_use = true
+public_rust_path = "cuda_intrinsics::warp::shuffle_sync_pred"
+compatibility_rust_paths = ["cuda_device::warp::shuffle_sync_pred"]
+dialect_op_type = "ShflSyncIdxI32PredOp"
+dialect_op_name = "nvvm.shfl_sync_idx_i32_pred"
+dialect_operands = ["i32", "i32", "i32"]
+dialect_results = ["i32", "i1"]
+llvm_symbol = "llvm.nvvm.shfl.sync.idx.i32p"
+llvm_arguments = ["i32", "i32", "i32", "i32"]
+llvm_results = ["i32", "i1"]
+pure = false
+memory = "inaccessible_read_write"
+convergent = true
+execution_scope = "warp"
+minimum_ptx = "6.0"
+minimum_sm = "sm_30"
+ptx_result = "(u32, bool)"
+targets = "all"
+ptx_isa_version = "9.3"
+ptx_isa_section = "9.7.9.6 Data Movement and Conversion Instructions: shfl.sync"
+ptx_isa_url = "https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-shfl-sync"
+lowering = "generated_warp_shuffle"
+backend_lowerings = [
+    { backend = "llvm_nvptx", mechanism = "typed_nvvm", evidence_profile = "rust-llvm-22.1.2-1cb4e383", minimum_ptx = "6.0", minimum_sm = "sm_30" },
+    { backend = "lib_nvvm", mechanism = "typed_nvvm", evidence_profile = "cuda-13.3-libnvvm-13.3.33", minimum_ptx = "6.0", minimum_sm = "sm_75" },
+]
+warp_shuffle = { mode = "idx", value_kind = "i32", predicate = true, participation = "executing_lane_named_all_named_lanes_same_instruction_and_mask", legacy_pre_sm70 = "all_named_lanes_converged_and_only_named_lanes_active", source_lane = "in_range_source_active_and_named_out_of_range_copies_self", adapter = "mask_value_lane_or_delta_insert_clamp", clamp = 31, lane_encoding = "register_or_immediate", mask_encoding = "register_or_immediate" }
+expected_ptx = { mnemonic = "shfl", modifiers = ["sync", "idx", "b32"], operands = [{ kind = "register_predicate_pair" }, { kind = "register" }, { kind = "register_or_immediate" }, { kind = "exact", value = "31" }, { kind = "register_or_immediate" }] }
+summary = "Read a 32-bit value from a named warp lane, reporting whether the source lane was in range."

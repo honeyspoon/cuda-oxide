@@ -5774,3 +5774,10 @@ status = "active"
 catalog_id = "cvt_rn_relu_f16x2_e5m2x2"
 operation_key = "packed.convert.e5m2x2.f16x2.nearest_even.relu"
 raw_rust_signature = { safe = true, arguments = ["u16"], result = "u32" }
+
+[[entry]]
+abi_id = "i0830"
+status = "active"
+catalog_id = "shuffle_sync_pred"
+operation_key = "warp.shuffle.sync.idx.i32.pred"
+raw_rust_signature = { safe = false, arguments = ["u32", "u32", "u32"], result = "(u32, bool)" }
