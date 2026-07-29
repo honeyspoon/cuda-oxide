@@ -102,6 +102,7 @@
 use crate::context::CudaContext;
 use crate::error::{DriverError, IntoResult};
 use crate::stream::CudaStream;
+use core::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 
@@ -371,5 +372,259 @@ mod tests {
         );
         // Global is the conservative choice, so it must be the default.
         assert_eq!(CaptureMode::default(), CaptureMode::Global);
+    }
+}
+
+// ===========================================================================
+// Experiment: can the buffer-lifetime obligation become a compile error?
+// ===========================================================================
+
+/// An executable graph whose lifetime is tied to the buffers its capture
+/// referenced.
+///
+/// This is the experimental alternative to [`GraphExec`] + `unsafe instantiate`.
+/// The idea: the driver never reports which allocations a captured graph
+/// references, but it does not need to. What keeps a buffer alive is Rust's
+/// *closure capture*, so if the returned exec carries a lifetime derived from
+/// the closure, the borrow checker refuses to let the exec outlive anything the
+/// closure borrowed.
+///
+/// Note there is **no runtime cost and no ownership change**: the closure runs
+/// once during capture and is dropped immediately. Only the lifetime survives,
+/// via `PhantomData`, and that is enough for the borrow checker to reject
+///
+/// ```ignore
+/// let exec = {
+///     let scratch = DeviceBuffer::<u32>::zeroed(&stream, 4)?;
+///     stream.capture_scoped(CaptureMode::Global, || { /* uses &scratch */ })?
+/// };            // scratch dropped here
+/// exec.launch(&stream)?;   // <- borrow checker error, not UB
+/// ```
+///
+/// The rejection, pinned as a `compile_fail` doctest so the gate proves it rather
+/// than the prose claiming it:
+///
+/// ```compile_fail
+/// use cuda_core::graph::CaptureMode;
+/// use cuda_core::{CudaContext, DeviceBuffer};
+///
+/// let ctx = CudaContext::new(0).unwrap();
+/// let stream = ctx.new_stream().unwrap();
+/// let mut dst = DeviceBuffer::<u32>::zeroed(&stream, 4).unwrap();
+///
+/// let mut exec = {
+///     let src = DeviceBuffer::from_host(&stream, &[7u32, 8, 9, 10]).unwrap();
+///     stream
+///         .capture_scoped(CaptureMode::Global, || dst.copy_from_device_async(&src, &stream))
+///         .unwrap()
+///     // `src` dropped here -> E0597: `src` does not live long enough
+/// };
+/// exec.launch(&stream).unwrap();
+/// ```
+///
+/// # The limitation that motivates [`OwnedGraphExec`]
+///
+/// The exec holds a *shared* borrow of everything the closure touched, so writing
+/// new input between replays -- which is what graph replay is for -- does not
+/// compile either:
+///
+/// ```compile_fail
+/// use cuda_core::graph::CaptureMode;
+/// use cuda_core::{CudaContext, DeviceBuffer};
+///
+/// let ctx = CudaContext::new(0).unwrap();
+/// let stream = ctx.new_stream().unwrap();
+/// let mut src = DeviceBuffer::<u32>::zeroed(&stream, 4).unwrap();
+/// let mut dst = DeviceBuffer::<u32>::zeroed(&stream, 4).unwrap();
+///
+/// let mut exec = stream
+///     .capture_scoped(CaptureMode::Global, || dst.copy_from_device_async(&src, &stream))
+///     .unwrap();
+///
+/// // E0502: cannot borrow `src` as mutable because it is also borrowed as immutable
+/// src.copy_from_host(&stream, &[1, 2, 3, 4]).unwrap();
+/// exec.launch(&stream).unwrap();
+/// ```
+///
+/// So this type is sound and zero-cost but rejects the primary use case. That is
+/// the evidence for [`OwnedGraphExec`], not a guess.
+#[derive(Debug)]
+pub struct ScopedGraphExec<'captures> {
+    cu_exec: cuda_bindings::CUgraphExec,
+    ctx: Arc<CudaContext>,
+    /// Ties this exec to everything the capture closure borrowed. Invariant in
+    /// `'captures` would be stricter than needed; covariance is correct here
+    /// because a shorter-lived exec is always sound.
+    captures: PhantomData<&'captures ()>,
+}
+
+impl ScopedGraphExec<'_> {
+    /// Replays the graph. `&mut self` for the same reason as
+    /// [`GraphExec::launch`]: concurrent replay of one exec is not permitted.
+    pub fn launch(&mut self, stream: &CudaStream) -> Result<(), DriverError> {
+        self.ctx.bind_to_thread()?;
+        unsafe { cuda_bindings::cuGraphLaunch(self.cu_exec, stream.cu_stream()).result() }
+    }
+}
+
+impl Drop for ScopedGraphExec<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = cuda_bindings::cuGraphExecDestroy(self.cu_exec);
+        }
+    }
+}
+
+impl CudaStream {
+    /// Captures the work `record` enqueues, and returns an executable graph that
+    /// **cannot outlive anything `record` borrowed**.
+    ///
+    /// This is safe where [`CapturedGraph::instantiate`] is `unsafe`, and the
+    /// difference is the lifetime on the return type rather than any extra
+    /// checking. The residual obligation is narrower but not empty: the work
+    /// must reference device memory only through values the closure borrows. A
+    /// raw pointer smuggled in from elsewhere is outside what the borrow checker
+    /// can see, exactly as it would be anywhere else.
+    ///
+    /// The capture guard still terminates on the error path, so a `record` that
+    /// returns `Err` leaves the stream usable.
+    pub fn capture_scoped<'captures, F>(
+        &self,
+        mode: CaptureMode,
+        record: F,
+    ) -> Result<ScopedGraphExec<'captures>, DriverError>
+    where
+        F: FnOnce() -> Result<(), DriverError> + 'captures,
+    {
+        let capture = self.begin_capture(mode)?;
+        // If `record` fails, dropping the guard terminates the capture, so the
+        // stream is left usable rather than stuck in the invalidated state.
+        record()?;
+        let graph = capture.end()?;
+        // SAFETY: the returned exec borrows `'captures`, so the borrow checker
+        // will not let it outlive anything `record` referenced -- which is the
+        // obligation `instantiate` otherwise pushes onto the caller.
+        let exec = unsafe { graph.instantiate() }?;
+        let cu_exec = exec.cu_graph_exec();
+        // Hand the raw handle to the scoped wrapper and suppress the original
+        // Drop, so ownership transfers rather than double-freeing.
+        core::mem::forget(exec);
+        Ok(ScopedGraphExec {
+            cu_exec,
+            ctx: Arc::clone(self.context()),
+            captures: PhantomData,
+        })
+    }
+}
+
+/// An executable graph that **owns** the state its capture referenced, and lends
+/// it back between replays.
+///
+/// This is the design the two simpler options fail to reach, and the failures are
+/// worth recording because they are what motivates the shape:
+///
+/// * A lifetime-only exec ([`ScopedGraphExec`]) rejects the use-after-free at
+///   compile time with no runtime cost — but it holds a shared borrow of every
+///   captured buffer, so writing new input between replays is
+///   `E0502: cannot borrow as mutable because it is also borrowed as immutable`.
+///   Sound, and unusable for the thing graphs are for.
+/// * `unsafe instantiate` with a documented obligation is usable and unsound: the
+///   violation is silent (`Ok(())` from launch, sync and read, with plausible
+///   data).
+///
+/// Moving the state in resolves both: nothing outside can drop it, and
+/// [`state_mut`](Self::state_mut) hands it back for the write-then-replay loop.
+///
+/// # Stream ordering is the residual obligation
+///
+/// `launch` *enqueues* a replay; it does not wait for it. So a write issued after
+/// `launch` returns is only safe if it is ordered behind the replay, which holds
+/// when both go on the same stream — `DeviceBuffer`'s copy helpers are all
+/// stream-ordered, so the natural usage is correct. Writing from a *different*
+/// stream, or from the host without synchronising, races the in-flight graph.
+/// That obligation is not expressible here and is documented rather than claimed.
+#[derive(Debug)]
+pub struct OwnedGraphExec<S> {
+    cu_exec: cuda_bindings::CUgraphExec,
+    ctx: Arc<CudaContext>,
+    state: S,
+}
+
+impl<S> OwnedGraphExec<S> {
+    /// Replays the graph on `stream`.
+    pub fn launch(&mut self, stream: &CudaStream) -> Result<(), DriverError> {
+        self.ctx.bind_to_thread()?;
+        unsafe { cuda_bindings::cuGraphLaunch(self.cu_exec, stream.cu_stream()).result() }
+    }
+
+    /// The captured state, for writing new input before the next replay.
+    ///
+    /// `&mut self` means this cannot overlap a `launch` call, though see the note
+    /// on stream ordering: it does not order against a replay already in flight.
+    pub fn state_mut(&mut self) -> &mut S {
+        &mut self.state
+    }
+
+    /// The captured state, immutably.
+    pub fn state(&self) -> &S {
+        &self.state
+    }
+
+    /// Gives the captured state back, destroying the graph.
+    pub fn into_state(self) -> S {
+        // Move `state` out without running `Drop for OwnedGraphExec`, then free
+        // the exec by hand so the graph is not leaked.
+        let me = core::mem::ManuallyDrop::new(self);
+        unsafe {
+            let _ = cuda_bindings::cuGraphExecDestroy(me.cu_exec);
+            core::ptr::read(&me.state)
+        }
+    }
+}
+
+impl<S> Drop for OwnedGraphExec<S> {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = cuda_bindings::cuGraphExecDestroy(self.cu_exec);
+        }
+    }
+}
+
+impl CudaStream {
+    /// Captures work that operates on `state`, and returns an executable graph
+    /// owning it.
+    ///
+    /// `record` receives `&mut S` and must enqueue its work on this stream. The
+    /// state is then reachable through [`OwnedGraphExec::state_mut`] for the
+    /// write-then-replay loop, and recoverable with
+    /// [`OwnedGraphExec::into_state`].
+    ///
+    /// Safe, because nothing outside the exec can drop the buffers the capture
+    /// referenced. See the type docs for the stream-ordering obligation that
+    /// remains.
+    pub fn capture_owning<S, F>(
+        &self,
+        mode: CaptureMode,
+        mut state: S,
+        record: F,
+    ) -> Result<OwnedGraphExec<S>, DriverError>
+    where
+        F: FnOnce(&mut S) -> Result<(), DriverError>,
+    {
+        let capture = self.begin_capture(mode)?;
+        // On `Err`, dropping the guard terminates the capture, so the stream
+        // stays usable and `state` is returned to the caller by being dropped.
+        record(&mut state)?;
+        let graph = capture.end()?;
+        // SAFETY: `state` is moved into the returned exec, so every buffer the
+        // capture referenced through it outlives every replay by construction.
+        let exec = unsafe { graph.instantiate() }?;
+        let cu_exec = exec.cu_graph_exec();
+        core::mem::forget(exec);
+        Ok(OwnedGraphExec {
+            cu_exec,
+            ctx: Arc::clone(self.context()),
+            state,
+        })
     }
 }

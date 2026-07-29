@@ -181,3 +181,52 @@ fn replay_after_freeing_a_captured_buffer_is_not_diagnosed() {
         launch.is_err() || sync.is_err() || read.is_err()
     );
 }
+
+/// The write-then-replay loop, which is what graph replay exists for and what
+/// `ScopedGraphExec` cannot express (its shared borrow of the captured buffers
+/// makes writing new input `E0502`; both rejections are pinned as `compile_fail`
+/// doctests on that type).
+///
+/// `capture_owning` moves the buffers in, so nothing outside can drop them and
+/// `state_mut` hands them back between replays. Note the closure needs no
+/// `unsafe`: `&mut b.dst` and `&b.src` are disjoint field borrows.
+#[test]
+fn an_owning_exec_supports_write_then_replay() {
+    struct Bufs {
+        src: DeviceBuffer<u32>,
+        dst: DeviceBuffer<u32>,
+    }
+
+    let ctx = context();
+    let stream = ctx.new_stream().expect("stream");
+    let bufs = Bufs {
+        src: DeviceBuffer::<u32>::zeroed(&stream, 4).expect("src"),
+        dst: DeviceBuffer::<u32>::zeroed(&stream, 4).expect("dst"),
+    };
+    stream.synchronize().expect("sync");
+
+    let mut exec = stream
+        .capture_owning(CaptureMode::Global, bufs, |b| {
+            b.dst.copy_from_device_async(&b.src, &stream)
+        })
+        .expect("capture_owning");
+
+    for i in 0..3u32 {
+        exec.state_mut()
+            .src
+            .copy_from_host(&stream, &[i, i + 1, i + 2, i + 3])
+            .expect("feed new input");
+        exec.launch(&stream).expect("replay");
+        stream.synchronize().expect("sync");
+        let got = exec.state().dst.to_host_vec(&stream).expect("read back");
+        assert_eq!(
+            got,
+            vec![i, i + 1, i + 2, i + 3],
+            "replay {i} must observe the new input"
+        );
+    }
+
+    // The buffers come back out, and the graph is destroyed with the exec.
+    let recovered = exec.into_state();
+    assert_eq!(recovered.src.len(), 4);
+}
