@@ -298,6 +298,97 @@ impl<'a, T, IndexSpace> DisjointSlice<'a, T, IndexSpace> {
         );
         unsafe { &mut *self.ptr.add(idx) }
     }
+
+    /// Write a value at the given index with bounds checking.
+    ///
+    /// This is a convenience method that combines bounds checking with
+    /// a direct write, avoiding the need for `get_unchecked_mut`
+    /// at every write site.
+    ///
+    /// Returns `true` if the write succeeded (index was in bounds),
+    /// `false` otherwise.
+    ///
+    /// # Safety
+    ///
+    /// - `idx` must be less than `self.len()` (bounds checked, but not the data race below).
+    /// - No two threads may write to the same index simultaneously.
+    ///
+    /// `T: Copy` is required because the write overwrites the slot without
+    /// running a destructor on the previous value. Restricting to `Copy` keeps
+    /// that from being a leak, and matches [`Self::read`]. Device buffers hold
+    /// plain data, so this costs nothing in practice.
+    /// - No thread may read an index while another thread writes to it,
+    ///   unless explicit synchronization (e.g., `sync_threads()`) separates the accesses.
+    ///
+    /// This is NOT enforced by the type system (unlike `get_mut` which
+    /// uses `ThreadIndex`). Use this only when the algorithm guarantees
+    /// unique write indices through means other than `ThreadIndex`,
+    /// such as:
+    /// - Warp reduction where only lane 0 writes
+    /// - Scatter operations with known-unique destinations
+    /// - Manual bounds checking in tiled algorithms
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Before: verbose unsafe pattern
+    /// unsafe { *output.get_unchecked_mut(row * n + col) = value; }
+    ///
+    /// // After: bounds-checked unsafe write
+    /// // SAFETY: each thread writes to a unique (row, col) index.
+    /// unsafe { output.write(row * n + col, value) };
+    /// ```
+    #[inline]
+    #[must_use]
+    pub unsafe fn write(&mut self, idx: usize, value: T) -> bool
+    where
+        T: Copy,
+    {
+        if idx < self.len {
+            // SAFETY: bounds check passed above. The caller guarantees no two
+            // threads write to the same index. `T: Copy` means the slot being
+            // overwritten has no destructor to run, so not dropping the old
+            // value cannot leak.
+            unsafe { core::ptr::write(self.ptr.add(idx), value) };
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Read a value at the given index with bounds checking.
+    ///
+    /// Returns `Some(value)` if the index is in bounds, `None` otherwise.
+    /// This reads by value (copies the element), which is appropriate for
+    /// scalar types like `f32`, `u32`, etc.
+    ///
+    /// # Safety
+    ///
+    /// - No thread may write to the same index while this read occurs.
+    /// - If this index was written by another thread, explicit synchronization
+    ///   (e.g., `sync_threads()`) must separate the write from this read.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // SAFETY: no concurrent writes to this index.
+    /// if let Some(val) = unsafe { output.read(row * n + col) } {
+    ///     // use val
+    /// }
+    /// ```
+    #[inline]
+    #[must_use]
+    pub unsafe fn read(&self, idx: usize) -> Option<T>
+    where
+        T: Copy,
+    {
+        if idx < self.len {
+            // SAFETY: bounds check passed above.
+            Some(unsafe { core::ptr::read(self.ptr.add(idx)) })
+        } else {
+            None
+        }
+    }
 }
 
 impl<'a, T, IS: IndexFormula> DisjointSlice<'a, T, IS> {
