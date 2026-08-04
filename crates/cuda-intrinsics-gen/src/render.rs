@@ -150,6 +150,18 @@ pub fn all_outputs(
         "crates/cuda-device/src/generated/bf16x2.rs".into(),
         render_compat_packed_alu(catalog, catalog_sha256, PackedAluFormat::Bf16x2),
     );
+    for (module, format) in [
+        ("f16", ExtendedMinMaxFormat::F16),
+        ("bf16", ExtendedMinMaxFormat::Bf16),
+    ] {
+        if extended_minmax(catalog).any(|record| extended_minmax_contract(record).format == format)
+        {
+            outputs.insert(
+                format!("crates/cuda-device/src/generated/{module}.rs").into(),
+                render_compat_scalar_minmax(catalog, catalog_sha256, module),
+            );
+        }
+    }
     outputs.insert(
         "crates/cuda-device/src/generated/f16x2.rs".into(),
         render_compat_packed_alu(catalog, catalog_sha256, PackedAluFormat::F16x2),
@@ -516,8 +528,8 @@ fn validate_renderable(catalog: &CatalogFile) -> Result<()> {
                     && record.dialect.op_name == "nvvm.movmatrix_trans_b16"
                     && record.dialect.operands == ["i32"]
                     && record.dialect.results == ["i32"]
-                    && record.semantics.pure
-                    && record.semantics.memory == "none"
+                    && !record.semantics.pure
+                    && record.semantics.memory == "inaccessible_read_write"
                     && record.semantics.convergent
                     && record.lowering == "generated_movmatrix_inline_ptx"
                     && record.movmatrix.is_some(),
@@ -721,6 +733,18 @@ fn validate_renderable(catalog: &CatalogFile) -> Result<()> {
                             "f32",
                             "f32",
                             ExtendedMinMaxAdapter::DirectF32,
+                        ),
+                        ExtendedMinMaxFormat::F16 => (
+                            "f16",
+                            "u16",
+                            "i16",
+                            ExtendedMinMaxAdapter::DirectHalfU16,
+                        ),
+                        ExtendedMinMaxFormat::Bf16 => (
+                            "bf16",
+                            "u16",
+                            "i16",
+                            ExtendedMinMaxAdapter::DirectHalfU16,
                         ),
                         ExtendedMinMaxFormat::F16x2 => (
                             "f16x2",
@@ -1783,6 +1807,8 @@ fn extended_minmax_contract(record: &CatalogIntrinsic) -> &crate::model::Extende
 fn extended_minmax_format_attr(record: &CatalogIntrinsic) -> &'static str {
     match extended_minmax_contract(record).format {
         ExtendedMinMaxFormat::F32 => "ExtendedMinMaxFormatAttr::F32",
+        ExtendedMinMaxFormat::F16 => "ExtendedMinMaxFormatAttr::F16",
+        ExtendedMinMaxFormat::Bf16 => "ExtendedMinMaxFormatAttr::Bf16",
         ExtendedMinMaxFormat::F16x2 => "ExtendedMinMaxFormatAttr::F16x2",
         ExtendedMinMaxFormat::Bf16x2 => "ExtendedMinMaxFormatAttr::Bf16x2",
     }
@@ -1817,9 +1843,18 @@ fn extended_minmax_xorsign_abs_attr(record: &CatalogIntrinsic) -> &'static str {
     }
 }
 
+fn extended_minmax_carrier(record: &CatalogIntrinsic) -> &'static str {
+    match extended_minmax_contract(record).format {
+        ExtendedMinMaxFormat::F32 => "MinMaxCarrier::F32",
+        ExtendedMinMaxFormat::F16 | ExtendedMinMaxFormat::Bf16 => "MinMaxCarrier::Half16",
+        ExtendedMinMaxFormat::F16x2 | ExtendedMinMaxFormat::Bf16x2 => "MinMaxCarrier::PackedU32",
+    }
+}
+
 fn extended_minmax_rust_type(record: &CatalogIntrinsic) -> &'static str {
     match extended_minmax_contract(record).format {
         ExtendedMinMaxFormat::F32 => "f32",
+        ExtendedMinMaxFormat::F16 | ExtendedMinMaxFormat::Bf16 => "u16",
         ExtendedMinMaxFormat::F16x2 | ExtendedMinMaxFormat::Bf16x2 => "u32",
     }
 }
@@ -5234,7 +5269,9 @@ fn render_compat_movmatrix(catalog: &CatalogFile, hash: &str) -> String {
         output.push_str(
             "///\n\
              /// Each lane supplies two packed b16 values. The warp collectively transposes the 8x8 tile.\n\
-             /// This register-only operation does not access or order memory.\n\
+             /// No addressable memory is touched, but the result depends on every lane's\n\
+             /// input, so the call is modelled as reading and writing inaccessible state:\n\
+             /// two calls with equal operands are not interchangeable.\n\
              ///\n\
              /// # Safety\n\
              /// All 32 warp lanes must execute the same call, and no lane may have exited.\n",
@@ -5819,8 +5856,36 @@ fn render_compat_tcgen05(catalog: &CatalogFile, hash: &str) -> String {
                     format!("CuSimd<u32, {count}>")
                 }
             }
-            Tcgen05Operation::St => "()".into(),
-            _ => "()".into(),
+            // Everything else is unit-returning. Listed rather than defaulted: a
+            // wildcard here would give a new value-returning operation the `()`
+            // signature and silently drop its result.
+            Tcgen05Operation::Alloc
+            | Tcgen05Operation::AllocCg2
+            | Tcgen05Operation::Dealloc
+            | Tcgen05Operation::DeallocCg2
+            | Tcgen05Operation::RelinquishAllocPermit
+            | Tcgen05Operation::RelinquishAllocPermitCg2
+            | Tcgen05Operation::FenceBeforeThreadSync
+            | Tcgen05Operation::FenceAfterThreadSync
+            | Tcgen05Operation::Commit
+            | Tcgen05Operation::CommitCg2
+            | Tcgen05Operation::CommitSharedCluster
+            | Tcgen05Operation::CommitSharedClusterCg2
+            | Tcgen05Operation::CommitMulticast
+            | Tcgen05Operation::CommitMulticastCg2
+            | Tcgen05Operation::MmaWsF16
+            | Tcgen05Operation::MmaWsBf16
+            | Tcgen05Operation::MmaWsTf32
+            | Tcgen05Operation::MmaF16
+            | Tcgen05Operation::MmaF16Cg2
+            | Tcgen05Operation::Mma
+            | Tcgen05Operation::CpSmemToTmem
+            | Tcgen05Operation::CpSmemToTmemCg2
+            | Tcgen05Operation::LoadWait
+            | Tcgen05Operation::StoreWait
+            | Tcgen05Operation::ShiftDown
+            | Tcgen05Operation::ShiftDownCg2
+            | Tcgen05Operation::St => "()".into(),
         };
         writeln!(output, "/// {}", record.summary).unwrap();
         if let Some(participation) = tcgen05_participation_doc(operation) {
@@ -6340,6 +6405,17 @@ fn render_compat_packed_alu(catalog: &CatalogFile, hash: &str, format: PackedAlu
         .unwrap();
         output.push_str("}\n\n");
     }
+    render_compat_extended_minmax_into(&mut output, catalog, module);
+    output
+}
+
+fn render_compat_scalar_minmax(catalog: &CatalogFile, hash: &str, module: &str) -> String {
+    let mut output = rust_header(catalog, hash);
+    writeln!(
+        output,
+        "// Included inside `cuda_device::{module}` to keep existing paths stable.\n"
+    )
+    .unwrap();
     render_compat_extended_minmax_into(&mut output, catalog, module);
     output
 }
@@ -9562,7 +9638,7 @@ use pliron_derive::{pliron_attr, pliron_op};
 
 #[pliron_attr(name = "nvvm.extended_minmax_format", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
-pub enum ExtendedMinMaxFormatAttr { F32, F16x2, Bf16x2 }
+pub enum ExtendedMinMaxFormatAttr { F32, F16, Bf16, F16x2, Bf16x2 }
 
 #[pliron_attr(name = "nvvm.extended_minmax_operation", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
@@ -9611,6 +9687,9 @@ impl ExtendedMinMaxOp {
     ) -> Ptr<Operation> {
         let result_ty = match &format {
             ExtendedMinMaxFormatAttr::F32 => FP32Type::get(ctx).into(),
+            ExtendedMinMaxFormatAttr::F16 | ExtendedMinMaxFormatAttr::Bf16 => {
+                IntegerType::get(ctx, 16, Signedness::Unsigned).into()
+            }
             ExtendedMinMaxFormatAttr::F16x2 | ExtendedMinMaxFormatAttr::Bf16x2 => {
                 IntegerType::get(ctx, 32, Signedness::Unsigned).into()
             }
@@ -9677,6 +9756,10 @@ impl Verify for ExtendedMinMaxOp {
         }
         let type_matches = |ty: pliron::r#type::TypeHandle| match &*format {
             ExtendedMinMaxFormatAttr::F32 => ty.deref(ctx).downcast_ref::<FP32Type>().is_some(),
+            ExtendedMinMaxFormatAttr::F16 | ExtendedMinMaxFormatAttr::Bf16 => ty
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|integer| integer.width() == 16),
             ExtendedMinMaxFormatAttr::F16x2 | ExtendedMinMaxFormatAttr::Bf16x2 => ty
                 .deref(ctx)
                 .downcast_ref::<IntegerType>()
@@ -13759,7 +13842,7 @@ fn render_lowering(catalog: &CatalogFile, hash: &str) -> String {
     if extended_minmax(catalog).next().is_some() {
         output = output.replace(
             "dotprod::convert_generated_dot_product, ",
-            "dotprod::convert_generated_dot_product, extended_minmax::convert_generated_extended_minmax, ",
+            "dotprod::convert_generated_dot_product, extended_minmax::{MinMaxCarrier, convert_generated_extended_minmax}, ",
         );
     }
     if elect_intrinsics(catalog).next().is_some() {
@@ -14583,7 +14666,7 @@ fn convert_generated_tcgen05_load(
                 extended_minmax_nan_attr(record),
                 extended_minmax_xorsign_abs_attr(record),
                 extended_minmax_ptx_mnemonic(record),
-                extended_minmax_contract(record).format != ExtendedMinMaxFormat::F32,
+                extended_minmax_carrier(record),
             )
             .unwrap();
         }
@@ -15855,6 +15938,8 @@ fn generated_intrinsic_variant(record: &CatalogIntrinsic) -> String {
     if let Some(minmax) = &record.extended_minmax {
         let format = match minmax.format {
             ExtendedMinMaxFormat::F32 => "GeneratedExtendedMinMaxFormat::F32",
+            ExtendedMinMaxFormat::F16 => "GeneratedExtendedMinMaxFormat::F16",
+            ExtendedMinMaxFormat::Bf16 => "GeneratedExtendedMinMaxFormat::Bf16",
             ExtendedMinMaxFormat::F16x2 => "GeneratedExtendedMinMaxFormat::F16x2",
             ExtendedMinMaxFormat::Bf16x2 => "GeneratedExtendedMinMaxFormat::Bf16x2",
         };
@@ -16084,7 +16169,7 @@ impl GeneratedIntrinsicTarget {
         replace_exact_render_fragment(
             &mut output,
             "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum GeneratedIntrinsicVariant {",
-            "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum GeneratedExtendedMinMaxFormat { F32, F16x2, Bf16x2 }\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum GeneratedExtendedMinMaxOperation { Min, Max }\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum GeneratedExtendedMinMaxSubnormal { Preserve, Ftz }\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum GeneratedExtendedMinMaxNan { Number, Nan }\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum GeneratedIntrinsicVariant {",
+            "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum GeneratedExtendedMinMaxFormat { F32, F16, Bf16, F16x2, Bf16x2 }\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum GeneratedExtendedMinMaxOperation { Min, Max }\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum GeneratedExtendedMinMaxSubnormal { Preserve, Ftz }\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum GeneratedExtendedMinMaxNan { Number, Nan }\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum GeneratedIntrinsicVariant {",
         );
         replace_exact_render_fragment(
             &mut output,
@@ -16359,6 +16444,8 @@ impl GeneratedIntrinsicTarget {
             let Some(op) = Operation::get_op::<ExtendedMinMaxOp>(operation, ctx) else { return false; };
             let format_matches = match format {
                 GeneratedExtendedMinMaxFormat::F32 => op.get_attr_nvvm_extended_minmax_format(ctx).as_deref() == Some(&ExtendedMinMaxFormatAttr::F32),
+                GeneratedExtendedMinMaxFormat::F16 => op.get_attr_nvvm_extended_minmax_format(ctx).as_deref() == Some(&ExtendedMinMaxFormatAttr::F16),
+                GeneratedExtendedMinMaxFormat::Bf16 => op.get_attr_nvvm_extended_minmax_format(ctx).as_deref() == Some(&ExtendedMinMaxFormatAttr::Bf16),
                 GeneratedExtendedMinMaxFormat::F16x2 => op.get_attr_nvvm_extended_minmax_format(ctx).as_deref() == Some(&ExtendedMinMaxFormatAttr::F16x2),
                 GeneratedExtendedMinMaxFormat::Bf16x2 => op.get_attr_nvvm_extended_minmax_format(ctx).as_deref() == Some(&ExtendedMinMaxFormatAttr::Bf16x2),
             };
@@ -18153,9 +18240,11 @@ pub(crate) fn render_probe(catalog: &CatalogFile, record: &CatalogIntrinsic, has
         }
         writeln!(output, "  ret {ty} %result\n}}").unwrap();
     } else if record.extended_minmax.is_some() {
-        let packed = extended_minmax_contract(record).format != ExtendedMinMaxFormat::F32;
-        let ty = if packed { "i32" } else { "float" };
-        let register = if packed { "r" } else { "f" };
+        let (ty, register) = match extended_minmax_contract(record).format {
+            ExtendedMinMaxFormat::F32 => ("float", "f"),
+            ExtendedMinMaxFormat::F16 | ExtendedMinMaxFormat::Bf16 => ("i16", "h"),
+            ExtendedMinMaxFormat::F16x2 | ExtendedMinMaxFormat::Bf16x2 => ("i32", "r"),
+        };
         writeln!(
             output,
             "define {ty} @probe_{}({ty} %a, {ty} %b) {{",
@@ -20797,8 +20886,8 @@ mod tests {
         record.dialect.op_name = "nvvm.movmatrix_trans_b16".into();
         record.dialect.operands = vec!["i32".into()];
         record.dialect.results = vec!["i32".into()];
-        record.semantics.pure = true;
-        record.semantics.memory = "none".into();
+        record.semantics.pure = false;
+        record.semantics.memory = "inaccessible_read_write".into();
         record.semantics.convergent = true;
         record.semantics.execution_scope = "warp".into();
         record.packed_atomic = None;
@@ -20967,7 +21056,7 @@ mod tests {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let catalog = crate::resolve::resolve(&repo_root).unwrap();
         validate_renderable(&catalog).unwrap();
-        assert_eq!(catalog.intrinsics.len(), 829);
+        assert_eq!(catalog.intrinsics.len(), 853);
         let records: Vec<_> = register_mmas(&catalog).collect();
         assert_eq!(records.len(), 129);
         let generated_records = records
@@ -22932,20 +23021,20 @@ mod tests {
         let catalog = crate::resolve::resolve(&repo_root).unwrap();
         validate_renderable(&catalog).unwrap();
         let records = extended_minmax(&catalog).collect::<Vec<_>>();
-        assert_eq!(records.len(), 28);
+        assert_eq!(records.len(), 52);
         assert_eq!(
             records
                 .iter()
                 .filter(|record| record.target.minimum_ptx.encoded() == 70)
                 .count(),
-            8
+            20
         );
         assert_eq!(
             records
                 .iter()
                 .filter(|record| record.target.minimum_ptx.encoded() == 72)
                 .count(),
-            20
+            32
         );
         for id in ["min_f16x2", "max_f16x2", "min_bf16x2", "max_bf16x2"] {
             assert_eq!(
@@ -22973,7 +23062,7 @@ mod tests {
             dialect
                 .matches("            (ExtendedMinMaxFormatAttr::")
                 .count(),
-            28
+            52
         );
         for attr in [
             "ExtendedMinMaxFormatAttr",
@@ -22988,7 +23077,7 @@ mod tests {
         assert!(dialect.contains("variant is not admitted"));
 
         let importer = render_importer(&catalog, "test-hash");
-        assert_eq!(importer.matches("ExtendedMinMaxOp::build(ctx").count(), 28);
+        assert_eq!(importer.matches("ExtendedMinMaxOp::build(ctx").count(), 52);
         assert!(importer.contains("cuda_device::float::min_xorsign_abs_f32"));
         assert!(importer.contains("cuda_device::bf16x2::max_nan_bf16x2"));
 
@@ -23030,12 +23119,31 @@ mod tests {
             f32_probe
                 .contains("call float asm \"max.ftz.NaN.xorsign.abs.f32 $0, $1, $2;\", \"=f,f,f\"")
         );
+        // Scalar 16-bit forms ride in `h` registers, not the packed `r` pair.
+        let half_record = records
+            .iter()
+            .copied()
+            .find(|record| record.id == "min_ftz_nan_f16")
+            .unwrap();
+        let half_probe = render_probe(&catalog, half_record, "test-hash");
+        assert!(half_probe.contains("call i16 asm \"min.ftz.NaN.f16 $0, $1, $2;\", \"=h,h,h\""));
+        let bf16_record = records
+            .iter()
+            .copied()
+            .find(|record| record.id == "max_nan_xorsign_abs_bf16")
+            .unwrap();
+        let bf16_probe = render_probe(&catalog, bf16_record, "test-hash");
+        assert!(
+            bf16_probe
+                .contains("call i16 asm \"max.NaN.xorsign.abs.bf16 $0, $1, $2;\", \"=h,h,h\"")
+        );
+        assert!(lowering.contains("MinMaxCarrier::Half16"));
 
         let outputs = all_outputs(&catalog, "{}\n".into(), "test-hash").unwrap();
         assert!(outputs.contains_key(&PathBuf::from(
             "crates/dialect-nvvm/src/ops/generated/extended_minmax.rs"
         )));
-        for module in ["float", "f16x2", "bf16x2"] {
+        for module in ["float", "f16", "bf16", "f16x2", "bf16x2"] {
             assert!(outputs.contains_key(&PathBuf::from(format!(
                 "crates/cuda-device/src/generated/{module}.rs"
             ))));
