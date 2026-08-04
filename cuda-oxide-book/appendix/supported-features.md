@@ -33,7 +33,7 @@ roadmap, **N/A** = not applicable or no identified need.
 | ABI Scalarization | **Full** | Slices are scalarized at kernel boundaries (`&[T]` -> `(ptr, len)`, reconstructed inside the function). Structs and closures pass by value as one byval `.param`; field flattening still applies on internal device-to-device calls. |
 
 Array value constants support primitive leaves (integers, `f16`, `f32`,
-`f64`), nested arrays, and tuples recursively composed from supported scalar,
+`f64`), nested arrays, and tuples recursively composed of supported scalar,
 enum, tuple, and zero-sized fields. Tuple element strides and field offsets
 come from rustc layout, including internal and trailing padding; direct tuple
 value constants use the same layout-aware decoder. Struct constants (direct
@@ -41,9 +41,19 @@ and promoted-by-reference) also read every field at its rustc layout offset,
 so padded, reordered, `#[repr(C)]`, and nested shapes decode correctly, and a
 struct's stored size is its padded size, which fixes the element stride for
 arrays of padded structs inside constants. Arrays whose elements are structs
-or initialized unions are not yet materialized as constants. Pointer-bearing
-array, tuple, and struct constants are rejected with a diagnostic until
-aggregate relocations can be represented without losing provenance.
+or initialized unions are not yet materialized as constants. Thin pointer
+fields in array, tuple, and struct **const** values that relocate to device
+statics are materialized via `MirGlobalAllocOp` per field, including
+non-zero byte addends into a static (see `struct_constant_provenance`,
+`tuple_constant_provenance`, `tuple_array_provenance`). Fat pointers, enum
+constants with relocations, and device-global *initializer* relocations
+remain rejected.
+
+Enum constants with direct thin-reference payloads preserve relocations to
+device statics, including non-zero byte addends. This includes niche-encoded
+`Option<&T>` and direct-tagged enum layouts. Anonymous promoted allocations and
+pointer relocations nested inside array, tuple, struct, or enum payload fields
+remain unsupported.
 
 ## Compiler: Closures
 

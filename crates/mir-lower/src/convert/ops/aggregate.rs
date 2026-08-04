@@ -36,6 +36,7 @@
 //! instead uses rustc's wrapping `niche_start + variant_offset` encoding and
 //! introduces no extra tag.
 
+use crate::convert::enum_payload_storage::{coerce_enum_payload_value, enum_payload_storage_type};
 use crate::convert::types::{
     EnumSlotMap, StructLayoutInfo, StructSlotMap, build_enum_slot_map, build_struct_slot_map,
     build_union_storage_type, convert_type, is_zero_sized_type, llvm_byte_faithful_twin,
@@ -895,6 +896,20 @@ fn canonicalize_bool_value_bytes(
     Ok(current)
 }
 
+/// Adapt a semantic enum payload value to or from its physical storage type.
+///
+/// Shared pointer leaves are converted through CUDA generic space recursively
+/// through struct/tuple payloads. Bool leaves are canonicalized separately on
+/// construction and narrowed recursively on extraction.
+fn coerce_enum_payload_storage(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    value: Value,
+    target_ty: TypeHandle,
+) -> Result<Value> {
+    coerce_enum_payload_value(ctx, rewriter, value, target_ty)
+}
+
 /// Convert `mir.construct_enum` (e.g. `E::A(x)`) to LLVM operations.
 ///
 /// Builds the enum value slot by slot, taking every index from
@@ -988,7 +1003,28 @@ pub(crate) fn convert_construct_enum(
         };
         match slot {
             Some(slot) => {
-                let insert_op = llvm::InsertValueOp::new(ctx, current_struct, operand, vec![*slot]);
+                let storage_ty = {
+                    let storage_type = llvm_struct_ty.deref(ctx);
+                    let storage_struct = storage_type
+                        .downcast_ref::<llvm_types::StructType>()
+                        .ok_or_else(|| {
+                            pliron::input_error_noloc!(
+                                "MirConstructEnumOp physical storage is not an LLVM struct"
+                            )
+                        })?;
+                    let storage_slot = *slot as usize;
+                    if storage_slot >= storage_struct.num_fields() {
+                        return pliron::input_err_noloc!(
+                            "MirConstructEnumOp physical field slot {} is out of range",
+                            slot
+                        );
+                    }
+                    storage_struct.field_type(storage_slot)
+                };
+                let stored_operand =
+                    coerce_enum_payload_storage(ctx, rewriter, operand, storage_ty)?;
+                let insert_op =
+                    llvm::InsertValueOp::new(ctx, current_struct, stored_operand, vec![*slot]);
                 rewriter.insert_operation(ctx, insert_op.get_operation());
                 current_struct = insert_op.get_operation().deref(ctx).get_result(0);
                 last_op = insert_op.get_operation();
@@ -1020,7 +1056,11 @@ pub(crate) fn convert_construct_enum(
         // bool-bearing payload (scalar i8 byte, or an aggregate with each
         // i1 leaf widened to i8), so canonicalize the stored value to that
         // twin: every physical bool byte becomes an unambiguous 0 or 1.
-        let stored_operand = canonicalize_bool_value_bytes(ctx, rewriter, operand)?;
+        let semantic_ty = slot_map.field_llvm_types[flat];
+        let storage_ty = enum_payload_storage_type(ctx, semantic_ty).map_err(anyhow_to_pliron)?;
+        let canonical_operand = canonicalize_bool_value_bytes(ctx, rewriter, operand)?;
+        let stored_operand =
+            coerce_enum_payload_storage(ctx, rewriter, canonical_operand, storage_ty)?;
         let store_op = llvm::StoreOp::new(ctx, stored_operand, field_ptr);
         rewriter.insert_operation(ctx, store_op.get_operation());
     }
@@ -1057,7 +1097,7 @@ fn enum_slot_map_of_operand(
         }
     };
     let abi_align = enum_ty.abi_align();
-    let mir_ty: TypeHandle = pliron::r#type::Type::register_instance(enum_ty, ctx).into();
+    let mir_ty: TypeHandle = pliron::r#type::Type::instantiate(enum_ty, ctx).into();
     let map = build_enum_slot_map(ctx, mir_ty).map_err(anyhow_to_pliron)?;
     Ok((map, abi_align))
 }
@@ -1110,7 +1150,7 @@ pub(crate) fn convert_set_discriminant(
     };
 
     let tag_offset = enum_ty.tag_offset();
-    let mir_ty: TypeHandle = pliron::r#type::Type::register_instance(enum_ty.clone(), ctx).into();
+    let mir_ty: TypeHandle = pliron::r#type::Type::instantiate(enum_ty.clone(), ctx).into();
     let slot_map = build_enum_slot_map(ctx, mir_ty).map_err(anyhow_to_pliron)?;
     let carrier_ty = slot_map.carrier_llvm_ty.ok_or_else(|| {
         pliron::input_error_noloc!("MirSetDiscriminantOp physical write has no carrier type")
@@ -1145,7 +1185,7 @@ pub(crate) fn convert_get_discriminant(
         .lookup_most_recent_of_type::<MirEnumType>(ctx, enum_val)
         .map(|ty| ty.clone())
         .ok_or_else(|| pliron::input_error_noloc!("Expected MirEnumType for discriminant read"))?;
-    let mir_ty: TypeHandle = pliron::r#type::Type::register_instance(enum_ty.clone(), ctx).into();
+    let mir_ty: TypeHandle = pliron::r#type::Type::instantiate(enum_ty.clone(), ctx).into();
     let slot_map = build_enum_slot_map(ctx, mir_ty).map_err(anyhow_to_pliron)?;
     let logical_ty = convert_type(ctx, enum_ty.discriminant_ty).map_err(anyhow_to_pliron)?;
     let logical_width = logical_ty
@@ -1343,7 +1383,14 @@ pub(crate) fn convert_enum_payload(
         Some(slot) => {
             let extract_op = llvm::ExtractValueOp::new(ctx, enum_val, vec![slot])?;
             rewriter.insert_operation(ctx, extract_op.get_operation());
-            rewriter.replace_operation(ctx, op, extract_op.get_operation());
+            let extracted = extract_op.get_operation().deref(ctx).get_result(0);
+            let semantic_value = coerce_enum_payload_storage(
+                ctx,
+                rewriter,
+                extracted,
+                slot_map.field_llvm_types[flat],
+            )?;
+            rewriter.replace_operation_with_values(ctx, op, vec![semantic_value]);
         }
         None if is_zero_sized_type(ctx, slot_map.field_llvm_types[flat]) => {
             let undef_op = llvm::UndefOp::new(ctx, slot_map.field_llvm_types[flat]);
@@ -1354,9 +1401,14 @@ pub(crate) fn convert_enum_payload(
             let slot_ptr =
                 spill_enum_value(ctx, rewriter, enum_val, slot_map.llvm_struct_ty, abi_align);
             let field_ptr = enum_byte_gep(ctx, rewriter, slot_ptr, slot_map.field_offsets[flat]);
-            let load_op = llvm::LoadOp::new(ctx, field_ptr, slot_map.field_llvm_types[flat]);
+            let semantic_ty = slot_map.field_llvm_types[flat];
+            let storage_ty =
+                enum_payload_storage_type(ctx, semantic_ty).map_err(anyhow_to_pliron)?;
+            let load_op = llvm::LoadOp::new(ctx, field_ptr, storage_ty);
             rewriter.insert_operation(ctx, load_op.get_operation());
-            rewriter.replace_operation(ctx, op, load_op.get_operation());
+            let stored = load_op.get_operation().deref(ctx).get_result(0);
+            let semantic = coerce_enum_payload_storage(ctx, rewriter, stored, semantic_ty)?;
+            rewriter.replace_operation_with_values(ctx, op, vec![semantic]);
         }
     }
 
@@ -2405,6 +2457,186 @@ mod tests {
             error.to_string().contains("target-mode dependent"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn shared_pointer_niche_payload_round_trips_through_generic_storage() {
+        let mut ctx = make_ctx();
+        let logical: TypeHandle = IntegerType::get(&ctx, 64, Signedness::Signed).into();
+        let pointee: TypeHandle = IntegerType::get(&ctx, 32, Signedness::Unsigned).into();
+        let shared: TypeHandle = MirPtrType::get_shared(&mut ctx, pointee, true).into();
+        let enum_ty: TypeHandle = MirEnumType::get_with_encoding(
+            &mut ctx,
+            "OptionShared".into(),
+            logical,
+            vec![0, 1],
+            vec![
+                EnumVariant::unit("None".into()),
+                EnumVariant::new_with_layout("Some".into(), vec![shared], vec![0], vec![8]),
+            ],
+            EnumEncoding {
+                tag_offset: 0,
+                total_size: 8,
+                abi_align: 8,
+                layout_kind: EnumLayoutKind::Niche,
+                carrier_kind: EnumCarrierKind::Pointer,
+                carrier_width: 64,
+                carrier_address_space: llvm_types::address_space::GENERIC,
+                niche_start: 0,
+                niche_variant_start: 0,
+                niche_variant_end: 0,
+                untagged_variant: 1,
+                variant_inhabited: vec![1, 1],
+                ..EnumEncoding::default()
+            },
+        )
+        .into();
+
+        let (module, block) = build_kernel(&mut ctx, vec![shared], vec![shared]);
+        let pointer = block.deref(&ctx).get_argument(0);
+        let construct = Operation::new(
+            &mut ctx,
+            MirConstructEnumOp::get_concrete_op_info(),
+            vec![enum_ty],
+            vec![pointer],
+            vec![],
+            0,
+        );
+        MirConstructEnumOp::new(construct)
+            .set_attr_construct_enum_variant_index(&ctx, VariantIndexAttr(1));
+        construct.insert_at_back(block, &ctx);
+        let option = construct.deref(&ctx).get_result(0);
+
+        let discriminant = Operation::new(
+            &mut ctx,
+            mir::MirGetDiscriminantOp::get_concrete_op_info(),
+            vec![logical],
+            vec![option],
+            vec![],
+            0,
+        );
+        discriminant.insert_at_back(block, &ctx);
+
+        let payload = Operation::new(
+            &mut ctx,
+            MirEnumPayloadOp::get_concrete_op_info(),
+            vec![shared],
+            vec![option],
+            vec![],
+            0,
+        );
+        let payload_op = MirEnumPayloadOp::new(payload);
+        payload_op.set_attr_payload_variant_index(&ctx, VariantIndexAttr(1));
+        payload_op.set_attr_payload_field_index(&ctx, FieldIndexAttr(0));
+        payload.insert_at_back(block, &ctx);
+        let result = payload.deref(&ctx).get_result(0);
+        append_mir_return(&mut ctx, block, vec![result]);
+
+        crate::lower_mir_to_llvm(&mut ctx, module).expect("lowering failed");
+        let body = kernel_blocks(&ctx, module);
+        assert_eq!(
+            count_ops::<llvm::AddrSpaceCastOp>(&ctx, &body),
+            2,
+            "construction must genericize the pointer and extraction must restore shared space"
+        );
+        assert_eq!(
+            count_ops::<llvm::PtrToIntOp>(&ctx, &body),
+            1,
+            "niche discrimination must inspect the generic pointer carrier"
+        );
+        assert_eq!(count_ops::<MirConstructEnumOp>(&ctx, &body), 0);
+        assert_eq!(count_ops::<MirEnumPayloadOp>(&ctx, &body), 0);
+    }
+
+    #[test]
+    fn nested_shared_pointer_payload_round_trips_through_recursive_storage() {
+        let mut ctx = make_ctx();
+        let logical: TypeHandle = IntegerType::get(&ctx, 32, Signedness::Unsigned).into();
+        let pointee: TypeHandle = IntegerType::get(&ctx, 32, Signedness::Unsigned).into();
+        let shared: TypeHandle = MirPtrType::get_shared(&mut ctx, pointee, true).into();
+        let inner: TypeHandle = MirStructType::get_with_full_layout(
+            &mut ctx,
+            "SharedPointerInner".into(),
+            vec!["pointer".into(), "cookie".into()],
+            vec![shared, logical],
+            vec![0, 1],
+            vec![0, 8],
+            16,
+            8,
+        )
+        .into();
+        let outer: TypeHandle = MirStructType::get_with_full_layout(
+            &mut ctx,
+            "SharedPointerOuter".into(),
+            vec!["inner".into(), "guard".into()],
+            vec![inner, logical],
+            vec![0, 1],
+            vec![0, 16],
+            24,
+            8,
+        )
+        .into();
+        let enum_ty: TypeHandle = MirEnumType::get_with_encoding(
+            &mut ctx,
+            "NestedSharedPointer".into(),
+            logical,
+            vec![0, 1],
+            vec![
+                EnumVariant::unit("None".into()),
+                EnumVariant::new_with_layout("Some".into(), vec![outer], vec![8], vec![24]),
+            ],
+            EnumEncoding {
+                tag_offset: 0,
+                total_size: 32,
+                abi_align: 8,
+                layout_kind: EnumLayoutKind::Direct,
+                carrier_kind: EnumCarrierKind::Integer,
+                carrier_width: 32,
+                variant_inhabited: vec![1, 1],
+                ..EnumEncoding::default()
+            },
+        )
+        .into();
+
+        let (module, block) = build_kernel(&mut ctx, vec![outer], vec![outer]);
+        let wrapper = block.deref(&ctx).get_argument(0);
+        let construct = Operation::new(
+            &mut ctx,
+            MirConstructEnumOp::get_concrete_op_info(),
+            vec![enum_ty],
+            vec![wrapper],
+            vec![],
+            0,
+        );
+        MirConstructEnumOp::new(construct)
+            .set_attr_construct_enum_variant_index(&ctx, VariantIndexAttr(1));
+        construct.insert_at_back(block, &ctx);
+        let option = construct.deref(&ctx).get_result(0);
+
+        let payload = Operation::new(
+            &mut ctx,
+            MirEnumPayloadOp::get_concrete_op_info(),
+            vec![outer],
+            vec![option],
+            vec![],
+            0,
+        );
+        let payload_op = MirEnumPayloadOp::new(payload);
+        payload_op.set_attr_payload_variant_index(&ctx, VariantIndexAttr(1));
+        payload_op.set_attr_payload_field_index(&ctx, FieldIndexAttr(0));
+        payload.insert_at_back(block, &ctx);
+        let result = payload.deref(&ctx).get_result(0);
+        append_mir_return(&mut ctx, block, vec![result]);
+
+        crate::lower_mir_to_llvm(&mut ctx, module).expect("lowering failed");
+        let body = kernel_blocks(&ctx, module);
+        assert_eq!(
+            count_ops::<llvm::AddrSpaceCastOp>(&ctx, &body),
+            2,
+            "construction and extraction must cast the nested shared pointer leaf"
+        );
+        assert_eq!(count_ops::<MirConstructEnumOp>(&ctx, &body), 0);
+        assert_eq!(count_ops::<MirEnumPayloadOp>(&ctx, &body), 0);
     }
 
     #[test]

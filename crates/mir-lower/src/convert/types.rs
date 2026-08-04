@@ -110,6 +110,7 @@ use pliron::context::{Context, Ptr};
 use pliron::operation::Operation;
 use pliron::r#type::{TypeHandle, type_cast};
 
+use super::enum_payload_storage::enum_payload_storage_type;
 use crate::type_conversion_interface::MirTypeConversion;
 
 // =============================================================================
@@ -581,9 +582,10 @@ fn make_padding_type(ctx: &mut Context, size: u64) -> TypeHandle {
 /// alignment without consuming storage. Pointer-bearing fields are preferred
 /// so an ordinary union copy keeps LLVM pointer provenance.
 ///
-/// NVPTX gives scalar integers natural alignments up to 16 bytes. Reject a
-/// more strongly aligned union instead of silently emitting a by-value type
-/// with a weaker ABI alignment.
+/// NVPTX gives scalar integers natural alignments up to 16 bytes. Stronger
+/// Rust alignment is carried explicitly on memory operations because LLVM
+/// aggregate types cannot encode over-alignment; the storage type still keeps
+/// the union's exact size and therefore its array stride.
 pub(crate) fn build_union_storage_type(
     ctx: &mut Context,
     union_ty: &MirUnionType,
@@ -593,13 +595,6 @@ pub(crate) fn build_union_storage_type(
     if align == 0 || !align.is_power_of_two() {
         return Err(anyhow::anyhow!(
             "union `{}` has invalid ABI alignment {}",
-            union_ty.name(),
-            align
-        ));
-    }
-    if align > 16 {
-        return Err(anyhow::anyhow!(
-            "union `{}` requires {}-byte alignment; cuda-oxide currently supports union alignments up to 16 bytes",
             union_ty.name(),
             align
         ));
@@ -658,7 +653,8 @@ pub(crate) fn build_union_storage_type(
         fields.push((llvm_field_ty, field_size, field_align, contains_pointer));
     }
 
-    let anchor_int = IntegerType::get(ctx, (align * 8) as u32, Signedness::Signless);
+    let storage_align = align.min(16);
+    let anchor_int = IntegerType::get(ctx, (storage_align * 8) as u32, Signedness::Signless);
     let anchor: TypeHandle = llvm_types::ArrayType::get(ctx, anchor_int.into(), 0).into();
     let mut storage_fields = vec![anchor];
     if size > 0 {
@@ -695,9 +691,9 @@ pub(crate) fn build_union_storage_type(
             union_ty.name()
         )
     })?;
-    if llvm_size != size || llvm_align != align {
+    if llvm_size != size || llvm_align > align {
         return Err(anyhow::anyhow!(
-            "union `{}` storage lowered to size/alignment {}/{} but rustc requires {}/{}",
+            "union `{}` storage lowered to incompatible size/alignment {}/{} but rustc requires {}/{}",
             union_ty.name(),
             llvm_size,
             llvm_align,
@@ -1154,8 +1150,9 @@ pub(crate) fn llvm_type_size_align(ctx: &Context, ty: TypeHandle) -> Option<(u64
     if ty_ref.is::<llvm_types::PointerType>() {
         // Lowering runs before the exporter chooses the minimal, legacy, or
         // modern NVPTX data layout. The first two use 64-bit pointers in all
-        // address spaces; modern NVVM alone uses p3:32. Enum storage rejects
-        // shared pointers below because no one target-agnostic size is sound.
+        // address spaces; modern NVVM alone uses p3:32. Callers that expose
+        // physical shared-pointer width must either genericize a direct
+        // pointer first or reject the target-dependent representation.
         return Some((8, 8));
     }
     if let Some(arr_ty) = ty_ref.downcast_ref::<llvm_types::ArrayType>() {
@@ -1458,18 +1455,14 @@ pub(crate) fn build_enum_slot_map(
             continue;
         }
         let llvm_ty = field_llvm_types[flat];
-        if llvm_type_contains_pointer_in_address_space(
-            ctx,
-            llvm_ty,
-            llvm_types::address_space::SHARED,
-        ) {
-            return Err(anyhow::anyhow!(
-                "enum slot map: `{}` field {} contains a shared-memory pointer whose size is target-mode dependent (64-bit PTX/legacy, 32-bit modern NVVM); refusing target-agnostic enum lowering",
-                name,
-                flat
-            ));
-        }
-        let (size, align) = llvm_type_size_align(ctx, llvm_ty).ok_or_else(|| {
+        // Enum payload storage uses one target-stable physical view. Shared
+        // pointer leaves become generic pointers recursively through LLVM
+        // structs (MIR structs/tuples), while bool leaves become canonical i8
+        // bytes. Unsupported pointer arrays/vectors fail closed here.
+        let storage_ty = enum_payload_storage_type(ctx, llvm_ty).map_err(|error| {
+            anyhow::anyhow!("enum slot map: `{}` field {}: {error}", name, flat)
+        })?;
+        let (size, align) = llvm_type_size_align(ctx, storage_ty).ok_or_else(|| {
             anyhow::anyhow!(
                 "enum slot map: `{}` field {} has unsupported LLVM size/alignment",
                 name,
@@ -1568,18 +1561,11 @@ pub(crate) fn build_enum_slot_map(
         // construction canonicalizes the value and writes it at its byte
         // offset; extraction re-loads the original type from the canonical
         // bytes, exactly like the scalar-bool path above.
-        let storage_ty = if llvm_type_contains_i1(ctx, llvm_ty) {
-            llvm_byte_faithful_twin(ctx, llvm_ty).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "enum slot map: `{}` field {} contains bool storage in a shape (e.g. an i1 vector) whose memory bytes cannot be canonicalized",
-                    name,
-                    flat
-                )
-            })?
-        } else {
-            llvm_ty
-        };
-        let field_gets_slot = storage_ty == llvm_ty;
+        // Bool-bearing aggregates remain slotless so their canonical byte view
+        // continues through the established spill path. Pointer-only nested
+        // aggregates may own a slot because construction/extraction now rebuild
+        // them recursively at the semantic/physical boundary.
+        let field_gets_slot = !llvm_type_contains_i1(ctx, llvm_ty);
 
         // Another variant already placed the same storage type at the same
         // position? Then both fields can simply use that claim: variants
@@ -3206,7 +3192,7 @@ mod tests {
     }
 
     #[test]
-    fn enum_slot_map_rejects_nonoverlapping_shared_pointer_payload() {
+    fn enum_slot_map_genericizes_nonoverlapping_shared_pointer_payload() {
         let mut ctx = make_ctx();
         let discr = mir_uint(&mut ctx, 32);
         let u32_ty = mir_uint(&mut ctx, 32);
@@ -3232,10 +3218,147 @@ mod tests {
             },
         )
         .into();
+        let map = build_enum_slot_map(&mut ctx, enum_ty)
+            .expect("a direct shared-pointer payload should use generic physical storage");
+        let field_slot = map.field_slots[0].expect("shared pointer field should own a slot");
+        let stored_ty = map
+            .llvm_struct_ty
+            .deref(&ctx)
+            .downcast_ref::<llvm_types::StructType>()
+            .map(|struct_ty| struct_ty.field_type(field_slot as usize))
+            .expect("field slot must exist");
+        assert_eq!(
+            stored_ty
+                .deref(&ctx)
+                .downcast_ref::<llvm_types::PointerType>()
+                .expect("shared pointer storage must remain a pointer")
+                .address_space(),
+            llvm_types::address_space::GENERIC,
+            "enum storage must use a target-stable generic pointer"
+        );
+        assert_eq!(
+            map.field_llvm_types[0]
+                .deref(&ctx)
+                .downcast_ref::<llvm_types::PointerType>()
+                .expect("semantic field must remain a pointer")
+                .address_space(),
+            llvm_types::address_space::SHARED,
+            "payload operations must retain the semantic shared address space"
+        );
+    }
+
+    #[test]
+    fn enum_slot_map_genericizes_nested_shared_pointer_payload() {
+        let mut ctx = make_ctx();
+        let discr = mir_uint(&mut ctx, 32);
+        let u32_ty = mir_uint(&mut ctx, 32);
+        let shared: TypeHandle = MirPtrType::get_shared(&mut ctx, u32_ty, false).into();
+        let wrapper: TypeHandle = MirStructType::get_with_full_layout(
+            &mut ctx,
+            "SharedPointerWrapper".into(),
+            vec!["pointer".into()],
+            vec![shared],
+            vec![0],
+            vec![0],
+            8,
+            8,
+        )
+        .into();
+        let enum_ty: TypeHandle = MirEnumType::get_with_encoding(
+            &mut ctx,
+            "NestedSharedPointerPayload".into(),
+            discr,
+            vec![0, 1],
+            vec![
+                EnumVariant::unit("Unit".into()),
+                EnumVariant::new_with_layout("Ptr".into(), vec![wrapper], vec![8], vec![8]),
+            ],
+            EnumEncoding {
+                tag_offset: 0,
+                total_size: 16,
+                abi_align: 8,
+                layout_kind: EnumLayoutKind::Direct,
+                carrier_kind: EnumCarrierKind::Integer,
+                carrier_width: 32,
+                variant_inhabited: vec![1, 1],
+                ..EnumEncoding::default()
+            },
+        )
+        .into();
+
+        let map = build_enum_slot_map(&mut ctx, enum_ty)
+            .expect("a struct-nested shared pointer should use generic physical storage");
+        let field_slot = map.field_slots[0].expect("nested payload should own a slot");
+        let stored_ty = map
+            .llvm_struct_ty
+            .deref(&ctx)
+            .downcast_ref::<llvm_types::StructType>()
+            .map(|struct_ty| struct_ty.field_type(field_slot as usize))
+            .expect("field slot must exist");
+        assert!(
+            llvm_type_contains_pointer_in_address_space(
+                &ctx,
+                stored_ty,
+                llvm_types::address_space::GENERIC
+            ),
+            "physical nested payload must contain a generic pointer"
+        );
+        assert!(
+            !llvm_type_contains_pointer_in_address_space(
+                &ctx,
+                stored_ty,
+                llvm_types::address_space::SHARED
+            ),
+            "physical nested payload must not retain the target-dependent AS3 pointer"
+        );
+        assert!(
+            llvm_type_contains_pointer_in_address_space(
+                &ctx,
+                map.field_llvm_types[0],
+                llvm_types::address_space::SHARED
+            ),
+            "semantic payload type must retain shared address-space semantics"
+        );
+    }
+
+    #[test]
+    fn enum_slot_map_rejects_shared_pointer_array_payload() {
+        let mut ctx = make_ctx();
+        let discr = mir_uint(&mut ctx, 32);
+        let u32_ty = mir_uint(&mut ctx, 32);
+        let shared: TypeHandle = MirPtrType::get_shared(&mut ctx, u32_ty, false).into();
+        let pointers: TypeHandle = MirArrayType::get(&mut ctx, shared, 2).into();
+        let enum_ty: TypeHandle = MirEnumType::get_with_encoding(
+            &mut ctx,
+            "SharedPointerArrayPayload".into(),
+            discr,
+            vec![0, 1],
+            vec![
+                EnumVariant::unit("Unit".into()),
+                EnumVariant::new_with_layout("Pointers".into(), vec![pointers], vec![8], vec![16]),
+            ],
+            EnumEncoding {
+                tag_offset: 0,
+                total_size: 24,
+                abi_align: 8,
+                layout_kind: EnumLayoutKind::Direct,
+                carrier_kind: EnumCarrierKind::Integer,
+                carrier_width: 32,
+                variant_inhabited: vec![1, 1],
+                ..EnumEncoding::default()
+            },
+        )
+        .into();
+
         let error = build_enum_slot_map(&mut ctx, enum_ty)
             .err()
-            .expect("shared pointer enum payload must reject");
-        assert!(error.to_string().contains("target-mode dependent"));
+            .expect("arrays of shared pointers remain an explicit boundary");
+        assert!(
+            error
+                .to_string()
+                .contains("arrays containing shared-memory pointers are not supported"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -3349,7 +3472,7 @@ mod tests {
     }
 
     #[test]
-    fn union_storage_rejects_unrepresentable_over_alignment() {
+    fn union_storage_preserves_over_aligned_size_and_stride() {
         let mut ctx = make_ctx();
         let u32_ty = mir_uint(&mut ctx, 32);
         let union_ty = MirUnionType::get(
@@ -3361,8 +3484,13 @@ mod tests {
             32,
         );
         let union_data = union_ty.deref(&ctx).clone();
-        let err = build_union_storage_type(&mut ctx, &union_data).unwrap_err();
-        assert!(err.to_string().contains("up to 16 bytes"));
+        let storage = build_union_storage_type(&mut ctx, &union_data).unwrap();
+        assert_eq!(llvm_type_size_align(&ctx, storage), Some((32, 16)));
+
+        let union_handle: TypeHandle = union_ty.into();
+        let array: TypeHandle = MirArrayType::get(&mut ctx, union_handle, 3).into();
+        let llvm_array = convert_type(&mut ctx, array).unwrap();
+        assert_eq!(llvm_type_size_align(&ctx, llvm_array), Some((96, 16)));
     }
 
     #[test]
