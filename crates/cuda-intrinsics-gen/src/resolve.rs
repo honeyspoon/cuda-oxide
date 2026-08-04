@@ -4783,7 +4783,12 @@ fn tcgen05_recipe(operation: Tcgen05Operation) -> Tcgen05Recipe {
                     Tcgen05Operation::MmaWsBf16 => {
                         "Issues warp-specialized bf16 tensor-memory MMA using the f16 instruction class."
                     }
-                    _ => "Issues warp-specialized tf32 tensor-memory MMA.",
+                    Tcgen05Operation::MmaWsTf32 => {
+                        "Issues warp-specialized tf32 tensor-memory MMA."
+                    }
+                    other => unreachable!(
+                        "the enclosing arm admits only warp-specialized MMA, got {other:?}"
+                    ),
                 },
             )
         }

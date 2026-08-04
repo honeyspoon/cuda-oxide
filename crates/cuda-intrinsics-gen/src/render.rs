@@ -5856,8 +5856,36 @@ fn render_compat_tcgen05(catalog: &CatalogFile, hash: &str) -> String {
                     format!("CuSimd<u32, {count}>")
                 }
             }
-            Tcgen05Operation::St => "()".into(),
-            _ => "()".into(),
+            // Everything else is unit-returning. Listed rather than defaulted: a
+            // wildcard here would give a new value-returning operation the `()`
+            // signature and silently drop its result.
+            Tcgen05Operation::Alloc
+            | Tcgen05Operation::AllocCg2
+            | Tcgen05Operation::Dealloc
+            | Tcgen05Operation::DeallocCg2
+            | Tcgen05Operation::RelinquishAllocPermit
+            | Tcgen05Operation::RelinquishAllocPermitCg2
+            | Tcgen05Operation::FenceBeforeThreadSync
+            | Tcgen05Operation::FenceAfterThreadSync
+            | Tcgen05Operation::Commit
+            | Tcgen05Operation::CommitCg2
+            | Tcgen05Operation::CommitSharedCluster
+            | Tcgen05Operation::CommitSharedClusterCg2
+            | Tcgen05Operation::CommitMulticast
+            | Tcgen05Operation::CommitMulticastCg2
+            | Tcgen05Operation::MmaWsF16
+            | Tcgen05Operation::MmaWsBf16
+            | Tcgen05Operation::MmaWsTf32
+            | Tcgen05Operation::MmaF16
+            | Tcgen05Operation::MmaF16Cg2
+            | Tcgen05Operation::Mma
+            | Tcgen05Operation::CpSmemToTmem
+            | Tcgen05Operation::CpSmemToTmemCg2
+            | Tcgen05Operation::LoadWait
+            | Tcgen05Operation::StoreWait
+            | Tcgen05Operation::ShiftDown
+            | Tcgen05Operation::ShiftDownCg2
+            | Tcgen05Operation::St => "()".into(),
         };
         writeln!(output, "/// {}", record.summary).unwrap();
         if let Some(participation) = tcgen05_participation_doc(operation) {
