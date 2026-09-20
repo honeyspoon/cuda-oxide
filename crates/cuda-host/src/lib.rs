@@ -51,7 +51,8 @@
 //! ```ignore
 //! use cuda_device::{kernel, thread, DisjointSlice};
 //! use cuda_host::cuda_module;
-//! use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+//! use cuda_core::simt::LaunchConfig;
+//! use cuda_core::{CudaContext, DeviceBuffer};
 //!
 //! #[cuda_module]
 //! mod kernels {
@@ -86,6 +87,7 @@
 //! ```
 
 pub mod embedded;
+pub mod entry_registry;
 pub mod kernel_family;
 pub mod launch;
 pub mod ltoir;
@@ -99,8 +101,9 @@ pub use kernel_family::{
     NoKernelSelectionCache, SelectedVariant, SelectionMode, SelectionSource,
 };
 pub use launch::{
-    CudaKernel, GenericCudaKernel, HasLength, KernelScalar, ReadOnly, Scalar, WriteOnly,
-    push_kernel_device_slice, push_kernel_scalar, read_only_device_buffer_arg,
+    CudaKernel, GenericCudaKernel, HasLength, KernelScalar, ReadOnly, RowWidth, RowWidthOwned,
+    Scalar, WriteOnly, push_kernel_device_slice, push_kernel_row_width_device_slice,
+    push_kernel_scalar, read_only_device_buffer_arg, row_width_device_buffer_arg,
     writable_device_buffer_arg,
 };
 #[doc(hidden)]
@@ -113,18 +116,28 @@ pub use launch::{
     load_cuda_module_from_async_context, load_kernel_module_async, new_async_kernel_launch_builder,
     new_owned_async_kernel_launch, new_prepared_async_kernel_launch,
     new_prepared_owned_async_kernel_launch, push_async_kernel_scalar,
-    push_async_read_only_device_slice, push_async_writable_device_slice,
+    push_async_owned_row_width_device_slice, push_async_read_only_device_slice,
+    push_async_row_width_device_slice, push_async_writable_device_slice,
     set_async_kernel_cluster_dim, set_async_kernel_cooperative,
 };
 
+/// The shared async crate, re-exported whole. Its root is cutile's Tile API;
+/// the SIMT surface cuda-host builds on is `cuda_host::cuda_async::simt::*`.
+/// Same-named root items such as `DeviceError` or `init_device_contexts` are
+/// the Tile ones and do not interoperate with the generated launch methods.
 #[cfg(feature = "async")]
 pub use cuda_async;
 #[cfg(feature = "async")]
-pub use cuda_async::launch::{AsyncKernelLaunch, AsyncKernelLaunchBuilder, OwnedAsyncKernelLaunch};
+pub use cuda_async::simt::launch::{
+    AsyncKernelLaunch, AsyncKernelLaunchBuilder, OwnedAsyncKernelLaunch,
+};
 
 pub use embedded::{
     EmbeddedModuleError, load_all_ptx_bundles_merged, load_embedded_module,
     load_first_embedded_module,
+};
+pub use entry_registry::{
+    diagnose_generic_kernel_load_error, divergent_type_id_entries, panic_generic_kernel_load_failed,
 };
 /// Loads a compiled kernel module by name. It prefers PTX, then
 /// handles NVVM IR (`<name>.ll`) or an existing `<name>.ltoir`, and finally a
@@ -140,7 +153,7 @@ pub use cuda_macros::{cuda_launch, cuda_module};
 
 /// Re-export of [`cuda_macros::cuda_launch_async`].
 ///
-/// Builds a lazy `cuda_async::launch::AsyncKernelLaunch`. Raw launch
+/// Builds a lazy `cuda_async::simt::launch::AsyncKernelLaunch`. Raw launch
 /// configuration is not tied to the kernel's indexing assumptions, so the
 /// macro must be called inside `unsafe`. Stream assignment is deferred to the
 /// scheduling policy -- call `.sync()` to block or `.await` to suspend.

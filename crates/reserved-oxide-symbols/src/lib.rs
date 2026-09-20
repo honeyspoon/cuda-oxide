@@ -3,9 +3,8 @@
 
 //! # `reserved-oxide-symbols` — INTERNAL workspace crate
 //!
-//! Single source of truth for the mangled symbol prefixes that the
-//! `#[kernel]` / `#[device]` proc macros emit and that the codegen
-//! backend, MIR-lowering, and LLVM-export passes consume.
+//! Single source of truth for the internal names that the procedural macros,
+//! codegen backend, MIR-lowering, and LLVM-export passes exchange.
 //!
 //! ## Not a public API
 //!
@@ -17,11 +16,13 @@
 //!
 //! ## What this crate owns
 //!
-//! The `cuda_oxide_*` namespace, reserved for cuda-oxide internal symbols.
-//! Every prefix below contains the component `246e25db_`, which is
+//! The `cuda_oxide_*` namespace, reserved for cuda-oxide internal symbols and
+//! compiler attributes.
+//! Every symbol prefix below contains the component `246e25db_`, which is
 //! `sha256("cuda_oxide_ + rust")` truncated to 8 hex chars. The hash
 //! makes accidental collisions effectively impossible — nobody writes
 //! `fn cuda_oxide_codegen_v1_cuda_oxide_kernel_246e25db_foo()` by accident.
+//! Internal operation-attribute keys also belong here; they are not link symbols.
 //!
 //! ## Layered API
 //!
@@ -66,6 +67,11 @@ pub const MATERIALIZE_CUBIN_ENV: &str = "CUDA_OXIDE_MATERIALIZE_CUBIN";
 /// again by the codegen backend before materialization.
 pub const MATERIALIZER_PROVENANCE_ENV: &str = "CUDA_OXIDE_INTERNAL_MATERIALIZER_PROVENANCE";
 
+/// Versioned descriptor-identity handoff accompanying
+/// [`MATERIALIZER_PROVENANCE_ENV`]. This is an acceleration hint; generated
+/// code remains keyed by the content-derived provenance digest.
+pub const MATERIALIZER_HANDSHAKE_ENV: &str = "CUDA_OXIDE_INTERNAL_MATERIALIZER_HANDSHAKE";
+
 /// Optional comma-separated filter selecting crates that may own device code.
 pub const DEVICE_CODEGEN_CRATE_ENV: &str = "CUDA_OXIDE_DEVICE_CODEGEN_CRATE";
 
@@ -76,6 +82,18 @@ pub const DEVICE_CODEGEN_CRATE_ENV: &str = "CUDA_OXIDE_DEVICE_CODEGEN_CRATE";
 /// the source-code level by checking `name.starts_with(RESERVED_ROOT)`
 /// and emitting a compile error.
 pub const RESERVED_ROOT: &str = "cuda_oxide_";
+
+/// MIR function-attribute prefix carrying a grid-constant pointee type.
+pub const MIR_GRID_CONSTANT_POINTEE_ATTR_PREFIX: &str = "cuda_oxide_grid_constant_pointee_";
+
+/// MIR function-attribute prefix carrying a grid-constant pointee alignment.
+pub const MIR_GRID_CONSTANT_ALIGN_ATTR_PREFIX: &str = "cuda_oxide_grid_constant_align_";
+
+/// LLVM-dialect function-attribute prefix carrying a grid-constant pointee type.
+pub const LLVM_GRID_CONSTANT_POINTEE_ATTR_PREFIX: &str = "cuda_oxide_param_grid_constant_pointee_";
+
+/// LLVM-dialect function-attribute prefix carrying a grid-constant pointee alignment.
+pub const LLVM_GRID_CONSTANT_ALIGN_ATTR_PREFIX: &str = "cuda_oxide_param_grid_constant_align_";
 
 /// Magic component embedded in every prefix to defend against accidental name
 /// collisions in user code.
@@ -177,6 +195,11 @@ pub const ARTIFACT_ANCHOR_PREFIX: &str = "cuda_oxide_artifact_anchor_246e25db_";
 /// before loading libNVVM or nvJitLink.
 pub const PTX_MERGE_REQUIRED_PREFIX: &str = "cuda_oxide_ptx_merge_required_246e25db_";
 
+/// Indexed LLVM operation-attribute key carrying proven kernel reference
+/// validity. This is compiler metadata, not a mangled link symbol.
+pub const KERNEL_REFERENCE_PARAM_VALIDITY_KEY_PREFIX: &str =
+    "cuda_oxide_kernel_reference_param_validity_";
+
 // ============================================================================
 // Layer 2 — builders (macro side)
 // ============================================================================
@@ -248,6 +271,11 @@ pub fn ptx_merge_required_marker(base: &str) -> String {
     let mut symbol = String::from(PTX_MERGE_REQUIRED_PREFIX);
     push_symbol_sanitized(&mut symbol, base);
     symbol
+}
+
+/// Build the operation-attribute key for one physical kernel parameter.
+pub fn kernel_reference_param_validity_key(index: usize) -> String {
+    format!("{KERNEL_REFERENCE_PARAM_VALIDITY_KEY_PREFIX}{index}")
 }
 
 /// Build the legacy artifact link-anchor symbol for a package and version.
@@ -396,6 +424,14 @@ pub fn is_ptx_merge_required_marker(name: &str) -> bool {
         .next()
         .and_then(|component| component.strip_prefix(PTX_MERGE_REQUIRED_PREFIX))
         .is_some_and(|base| !base.is_empty())
+}
+
+/// Extract the parameter-index text from a reference-validity attribute key.
+///
+/// Preserve malformed or empty suffixes so the compiler can diagnose invalid
+/// metadata instead of treating it as an unrelated attribute.
+pub fn kernel_reference_param_validity_index_text(key: &str) -> Option<&str> {
+    key.strip_prefix(KERNEL_REFERENCE_PARAM_VALIDITY_KEY_PREFIX)
 }
 
 /// Returns `true` if `name` is a closure-monomorphization helper symbol.
@@ -585,12 +621,35 @@ mod tests {
             PTX_MERGE_REQUIRED_PREFIX,
             "cuda_oxide_ptx_merge_required_246e25db_"
         );
+        assert_eq!(
+            ARTIFACT_ANCHOR_PREFIX,
+            "cuda_oxide_artifact_anchor_246e25db_"
+        );
+        assert_eq!(
+            KERNEL_REFERENCE_PARAM_VALIDITY_KEY_PREFIX,
+            "cuda_oxide_kernel_reference_param_validity_"
+        );
+        // `KERNEL_SCOPE_LOCAL` is not a link symbol, but renaming it silently
+        // disarms two hygiene regressions that spell it as an *identifier*,
+        // where no compiler check ties them back to this constant:
+        //
+        //   * crates/cuda-macros/tests/pass/kernel_launch_context_api.rs
+        //     declares a binding named `{KERNEL_SCOPE_LOCAL}_storage` so the
+        //     mixed-site storage binding must survive the collision.
+        //   * crates/rustc-codegen-cuda/examples/const_generic/src/main.rs
+        //     declares a const generic named `KERNEL_SCOPE_LOCAL` so
+        //     `call_site_ident_avoiding_item` must take its rename path.
+        //
+        // Both keep passing once renamed, because there is simply nothing left
+        // to collide with. Update them together with this constant.
+        assert_eq!(KERNEL_SCOPE_LOCAL, "cuda_oxide_kernel_scope_246e25db");
     }
 
-    /// Every prefix shares the reserved root. The macro guard checks
+    /// Every reserved name shares the reserved root. The macro guard checks
     /// for `RESERVED_ROOT` and rejects user-defined names that start
     /// with it; this test ensures the reserved root remains a true
-    /// prefix of all four mangled categories.
+    /// prefix of every mangled category this crate hands out, including the
+    /// artifact anchor and the injected scope local.
     #[test]
     fn all_prefixes_share_reserved_root() {
         for p in [
@@ -602,6 +661,9 @@ mod tests {
             INSTANTIATE_PREFIX,
             CONSTANT_PREFIX,
             PTX_MERGE_REQUIRED_PREFIX,
+            ARTIFACT_ANCHOR_PREFIX,
+            KERNEL_SCOPE_LOCAL,
+            KERNEL_REFERENCE_PARAM_VALIDITY_KEY_PREFIX,
         ] {
             assert!(
                 p.starts_with(RESERVED_ROOT),
@@ -635,6 +697,32 @@ mod tests {
         assert!(!is_ptx_merge_required_marker(PTX_MERGE_REQUIRED_PREFIX));
         assert!(!is_ptx_merge_required_marker(&format!("prefix_{marker}")));
         assert!(!is_ptx_merge_required_marker(&format!("{marker}::child")));
+    }
+
+    #[test]
+    fn reference_validity_keys_preserve_parameter_indices_and_malformed_suffixes() {
+        for index in [0, 1, usize::MAX] {
+            let key = kernel_reference_param_validity_key(index);
+            assert_eq!(
+                kernel_reference_param_validity_index_text(&key),
+                Some(index.to_string().as_str())
+            );
+            assert_eq!(
+                kernel_reference_param_validity_index_text(&format!("prefix_{key}")),
+                None
+            );
+        }
+        for suffix in ["", "invalid", "0_extra"] {
+            let key = format!("{KERNEL_REFERENCE_PARAM_VALIDITY_KEY_PREFIX}{suffix}");
+            assert_eq!(
+                kernel_reference_param_validity_index_text(&key),
+                Some(suffix)
+            );
+        }
+        assert_eq!(
+            kernel_reference_param_validity_index_text("gpu_kernel"),
+            None
+        );
     }
 
     /// `kernel_base_name(kernel_symbol(x)) == Some(x)` for any reasonable

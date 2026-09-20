@@ -54,7 +54,7 @@ at compile time. You declare it as a `static mut` inside the kernel:
 
 ```rust
 use cuda_device::thread::Runtime2DIndex;
-use cuda_device::{kernel, thread, DisjointSlice, SharedArray};
+use cuda_device::{DisjointSlice, SharedArray, kernel, thread};
 
 const TILE: usize = 16;
 
@@ -103,8 +103,8 @@ pub fn tiled_sgemm(
         t += 1;
     }
 
-    // SAFETY: every thread sees the same `n_sz`.
-    if let Some(c_idx) = unsafe { thread::index_2d_runtime(n_sz) } {
+    // The row width comes from `c`, bound on the host to this same `n`.
+    if let Some(c_idx) = thread::index_2d_runtime(&c) {
         if let Some(c_elem) = c.get_mut(c_idx) {
             *c_elem = sum;
         }
@@ -161,7 +161,7 @@ share a single shared memory pool across multiple logical arrays.
 size is set at launch time via `LaunchConfig::shared_mem_bytes`:
 
 ```rust
-use cuda_device::{kernel, thread, DynamicSharedArray};
+use cuda_device::{DisjointSlice, DynamicSharedArray, kernel, thread};
 
 #[kernel]
 pub fn reduce_dynamic(input: &[f32], n: u32, mut output: DisjointSlice<f32>) {

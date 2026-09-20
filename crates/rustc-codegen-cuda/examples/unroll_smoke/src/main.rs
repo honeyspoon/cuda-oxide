@@ -17,7 +17,8 @@
 //!
 //! Run: cargo oxide run unroll_smoke
 
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, DeviceBuffer};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_module;
 
@@ -362,11 +363,7 @@ fn main() {
     println!("=== unroll_smoke ===\n");
 
     let ctx = CudaContext::new(0).expect("Failed to create CUDA context");
-    let ptx_path = concat!(env!("CARGO_MANIFEST_DIR"), "/unroll_smoke.ptx");
-    let module = ctx
-        .load_module_from_file(ptx_path)
-        .expect("Failed to load PTX");
-    let module = kernels::from_module(module).expect("Failed to initialize typed module");
+    let module = kernels::load(&ctx).expect("Failed to load embedded CUDA module");
     let stream = ctx.default_stream();
 
     const BLOCK: u32 = 32;

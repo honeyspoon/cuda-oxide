@@ -49,10 +49,10 @@ Two safe/raw pairs, checked against a CPU reference:
   leaves early hangs the block). Staging reads `.get(i).unwrap_or(0.0)`,
   so an out-of-range load becomes zero fill, with no extra control flow.
 
-Both safe kernels write C through `tile_2d32_rt`, whose single `unsafe`
-obligation is that every thread passes the same row width. Here the width
-is `n`, a kernel argument, and all threads of a launch read the same
-arguments, so the obligation holds by construction.
+Both safe kernels write C through `tile_2d32_rt`, which is safe: the row
+width is not passed at the call site at all. The host binds it into C's
+slice once for the launch (`cuda_host::RowWidth`), so every thread reads
+the same width by construction and no call-site obligation remains.
 
 The launch contract makes the buffer sizes part of the kernel's interface:
 
@@ -85,10 +85,16 @@ identical global-memory load/store instruction sets.
 
 | kernel             | time     | GFLOPS |
 | ------------------ | -------- | ------ |
-| naive views (safe) | 0.300 ms | 7159   |
-| naive raw (unsafe) | 0.300 ms | 7161   |
-| tiled views (safe) | 0.232 ms | 9272   |
-| tiled raw (unsafe) | 0.231 ms | 9286   |
+| naive views (safe) | 0.298 ms | 7201   |
+| naive raw (unsafe) | 0.298 ms | 7201   |
+| tiled views (safe) | 0.229 ms | 9370   |
+| tiled raw (unsafe) | 0.230 ms | 9337   |
+
+These numbers depend on the pipeline disabling llc's late branch folding:
+LLVM 23 started rewriting loop branches into a single negated conditional,
+which ptxas's SASS unroller does not recognize, and the naive kernels lose
+about a quarter of their throughput. The rationale and measurements live
+on `DISABLE_BRANCH_FOLD` in `crates/cuda-oxide-codegen/src/ptx.rs`.
 
 For scale: the `gemm` example (plain `a[i]`, checked on every read) runs
 the same problem at roughly 2940 GFLOPS. Removing the per-read checks

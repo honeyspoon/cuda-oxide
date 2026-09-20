@@ -1,4 +1,4 @@
-// Copyright (c) 2024-2026 NVIDIA CORPORATION. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Regression test for `Ord::cmp` in device code (issue #136) and for
@@ -21,7 +21,8 @@
 //!
 //! Run: cargo oxide run ord_cmp
 
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, DeviceBuffer};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_module;
 
@@ -240,10 +241,7 @@ fn main() {
     println!("=== Ord cmp regression test ===");
 
     let ctx = CudaContext::new(0).expect("failed to create CUDA context");
-    let module = ctx
-        .load_module_from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/ord_cmp.ptx"))
-        .expect("failed to load PTX");
-    let module = kernels::from_module(module).expect("failed to initialize typed CUDA module");
+    let module = kernels::load(&ctx).expect("Failed to load embedded CUDA module");
     let stream = ctx.default_stream();
 
     let config = LaunchConfig {

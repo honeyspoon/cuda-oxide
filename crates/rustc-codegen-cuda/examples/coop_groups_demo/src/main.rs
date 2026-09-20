@@ -20,7 +20,8 @@
 //! op/type matrix. The generated `coop_groups_demo.ptx` is also handy
 //! for inspecting how each kernel actually lowers.
 
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig, LaunchConfig1D};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig1D};
 use cuda_device::cooperative_groups::{
     ThreadGroup, WarpCollective, block_reduce, block_scan, coalesced_threads,
     ops::{BitAnd, BitOr, BitXor, Max, Min, Sum},
@@ -227,8 +228,8 @@ pub fn test_typed_warp16_ballot(mut out: DisjointSlice<u32>) {
     }
 }
 
-/// Check tile-relative and sparse-group shuffle source handling. The stored
-/// value remains each 16-lane tile's lane-0 broadcast.
+/// Check tile-relative shuffles plus sparse-group ballot packing and shuffle
+/// source handling. The stored value remains each 16-lane tile's lane-0 broadcast.
 #[kernel]
 pub fn test_typed_warp16_shfl(mut out: DisjointSlice<u32>) {
     let gid = thread::index_1d();
@@ -256,7 +257,8 @@ pub fn test_typed_warp16_shfl(mut out: DisjointSlice<u32>) {
             });
     let coalesced_ok = if lane & 1 == 0 {
         let group = coalesced_threads();
-        (group.shfl(lane, group.size()) == lane)
+        (group.ballot((lane & 2) != 0) == 0xAAAA)
+            & (group.shfl(lane, group.size()) == lane)
             & (group.shfl_xor(lane, 1) == lane)
             & (group.shfl_down(lane, 1) == lane)
             & (group.shfl_up(lane, 1) == lane)
@@ -268,8 +270,18 @@ pub fn test_typed_warp16_shfl(mut out: DisjointSlice<u32>) {
     } else {
         true
     };
+    // Include the top physical lane and gaps of different sizes, so the
+    // device regression cannot pass by merely shifting an even-lane ballot.
+    let irregular_ok = if (0x8010_0089u32 & (1u32 << lane)) != 0 {
+        let group = coalesced_threads();
+        (group.ballot(lane == 3 || lane == 20 || lane == 31) == 0x1A)
+            & (group.ballot(true) == 0x1F)
+            & (group.ballot(false) == 0)
+    } else {
+        true
+    };
     if let Some(slot) = out.get_mut(gid) {
-        *slot = if tile_ok & coalesced_ok {
+        *slot = if tile_ok & coalesced_ok & irregular_ok {
             broadcast
         } else {
             u32::MAX
@@ -665,21 +677,32 @@ fn main() {
     println!("=== Cooperative Groups Demo ===\n");
 
     let ctx = CudaContext::new(0).expect("Failed to create CUDA context");
+
+    // Thread block clusters require sm_90 (Hopper) or later.
+    let (major, minor) = ctx.compute_capability().expect("compute capability");
+    if major < 9 {
+        println!("skipping: thread block clusters require sm_90+ (device is sm_{major}{minor})");
+        return;
+    }
+
     let stream = ctx.default_stream();
 
-    let module = ctx
-        .load_module_from_file("coop_groups_demo.ptx")
-        .expect("Failed to load PTX module");
-
-    // Typed handle for the `#[cuda_module]` grid-sync kernels. Their
+    // Typed handle for the `#[cuda_module]` grid-sync kernels, loaded from the
+    // artifact embedded in this binary rather than a loose `.ptx`, so there is
+    // nothing to find on disk and `--materialize-cubin` works. Their
     // `#[cooperative_launch]` attribute makes the generated launch methods
     // submit cooperative launches, so no per-call flag is needed.
-    // SAFETY: `module` was loaded from this example's own PTX bundle, which
-    // contains the grid-sync and cluster-coop entry points declared below.
-    let grid_sync_module = unsafe {
-        grid_sync_kernels::from_module(module.clone())
-            .expect("Failed to initialize typed grid-sync module")
-    };
+    //
+    // SAFETY: `load` selects this package's own embedded bundle, which is
+    // compiled from the module below and so carries exactly the entry points
+    // and ABI the generated launch methods expect.
+    let grid_sync_module =
+        unsafe { grid_sync_kernels::load(&ctx) }.expect("Failed to load embedded grid-sync module");
+
+    // The kernels outside the `#[cuda_module]` are launched through
+    // `cuda_launch!`, which takes the raw module. It is the same load, so both
+    // paths run the same image -- one `cuModuleLoad`, not two.
+    let module = grid_sync_module.as_cuda_module().clone();
 
     const N: usize = 256;
     let cfg = LaunchConfig {

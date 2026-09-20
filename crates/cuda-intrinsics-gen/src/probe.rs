@@ -3,10 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use crate::extract::read_upstream_lock;
 use crate::model::{
     BackendLoweringMechanism, CatalogFile, CatalogInputs, CatalogIntrinsic, CatalogLlvm,
     CatalogTargetRequirement, CpAsyncSourceSize, EvidenceStageKind, IntrinsicBackend,
-    IntrinsicSource, SparseMmaSelector, WarpShuffleAdapter,
+    IntrinsicSource, RustcCommit, SparseMmaSelector, WarpShuffleAdapter,
 };
 use crate::ptx::{
     InstructionPattern, OperandPattern, instructions_with_matching_head, matching_instructions,
@@ -15,22 +16,43 @@ use crate::render::render_probe;
 use crate::resolve::{resolve, resolve_candidate};
 use crate::util::{pretty_json, sha256_bytes, sha256_file};
 use anyhow::{Context, Result, ensure};
+use cuda_target_spec::{CudaArch, PtxSpelling, recorded_ptx_floor};
 use serde::Serialize;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProbeMode {
-    SelectedEvidence,
-    Comparison,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolIdentity {
+    version: String,
+    sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LlcIdentity {
-    version: String,
-    sha256: String,
+struct SelectedBackendIdentity {
+    tool: ToolIdentity,
+    rustc_commit: RustcCommit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProbeBackendIdentity {
+    SelectedEvidence(SelectedBackendIdentity),
+    Comparison(ToolIdentity),
+}
+
+impl ProbeBackendIdentity {
+    fn tool(&self) -> &ToolIdentity {
+        match self {
+            Self::SelectedEvidence(identity) => &identity.tool,
+            Self::Comparison(identity) => identity,
+        }
+    }
+
+    fn is_selected_evidence(&self) -> bool {
+        matches!(self, Self::SelectedEvidence(_))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +130,7 @@ pub fn run(
     intrinsic_id: &str,
     llc: Option<PathBuf>,
     skip_terminal: bool,
+    per_target: bool,
 ) -> Result<()> {
     let catalog = resolve(repo_root)?;
     let record = catalog
@@ -117,10 +140,15 @@ pub fn run(
         .with_context(|| format!("unknown catalog intrinsic {intrinsic_id}"))?;
     let runner = ProbeRunner::new(repo_root, &catalog, llc, skip_terminal)?;
     runner.validate_backend(record)?;
-    runner.run(record)
+    runner.run(record, per_target).map(|_| ())
 }
 
-pub fn run_all(repo_root: &Path, llc: Option<PathBuf>, skip_terminal: bool) -> Result<()> {
+pub fn run_all(
+    repo_root: &Path,
+    llc: Option<PathBuf>,
+    skip_terminal: bool,
+    per_target: bool,
+) -> Result<()> {
     let catalog = resolve(repo_root)?;
     ensure!(
         !catalog.intrinsics.is_empty(),
@@ -129,33 +157,33 @@ pub fn run_all(repo_root: &Path, llc: Option<PathBuf>, skip_terminal: bool) -> R
     let runner = ProbeRunner::new(repo_root, &catalog, llc, skip_terminal)?;
 
     validate_backend_identities(
-        runner.mode,
-        catalog.intrinsics.iter().map(|record| {
-            (
-                record.id.as_str(),
-                record.backend.version.as_str(),
-                record.backend.sha256.as_str(),
-            )
-        }),
         &runner.identity,
+        &runner.expected_commit,
+        catalog.intrinsics.iter().map(|record| BackendExpectation {
+            intrinsic_id: &record.id,
+            version: &record.backend.version,
+        }),
     )?;
 
     let total = catalog.intrinsics.len();
+    let mut target_probes = 0;
     for (index, record) in catalog.intrinsics.iter().enumerate() {
         eprintln!("[{}/{}] probing {}", index + 1, total, record.id);
-        runner
-            .run(record)
+        target_probes += runner
+            .run(record, per_target)
             .with_context(|| format!("probe {}", record.id))?;
     }
-    println!("probed all {total} generated intrinsic routes");
+    println!(
+        "probed {target_probes} target configurations across all {total} generated intrinsic routes"
+    );
     Ok(())
 }
 
 struct ProbeRunner<'a> {
     catalog: &'a CatalogFile,
     llc: PathBuf,
-    mode: ProbeMode,
-    identity: LlcIdentity,
+    identity: ProbeBackendIdentity,
+    expected_commit: RustcCommit,
     output_dir: PathBuf,
     catalog_hash: String,
     skip_terminal: bool,
@@ -168,11 +196,22 @@ impl<'a> ProbeRunner<'a> {
         llc: Option<PathBuf>,
         skip_terminal: bool,
     ) -> Result<Self> {
-        let (llc, mode) = match llc {
-            Some(path) => (path, ProbeMode::Comparison),
-            None => (rust_toolchain_llc()?, ProbeMode::SelectedEvidence),
+        let expected_commit = read_upstream_lock(repo_root)?.rust_toolchain.commit_hash;
+        let (llc, identity) = match llc {
+            Some(path) => {
+                let identity = ProbeBackendIdentity::Comparison(llc_identity(&path)?);
+                (path, identity)
+            }
+            None => {
+                let (path, rustc_commit) = rust_toolchain_llc()?;
+                let tool = llc_identity(&path)?;
+                let identity = ProbeBackendIdentity::SelectedEvidence(SelectedBackendIdentity {
+                    tool,
+                    rustc_commit,
+                });
+                (path, identity)
+            }
         };
-        let identity = llc_identity(&llc)?;
         let output_dir = repo_root.join("target/intrinsics/probes");
         fs::create_dir_all(&output_dir)?;
         let catalog_json = pretty_json(catalog)?;
@@ -180,8 +219,8 @@ impl<'a> ProbeRunner<'a> {
         Ok(Self {
             catalog,
             llc,
-            mode,
             identity,
+            expected_commit,
             output_dir,
             catalog_hash,
             skip_terminal,
@@ -190,14 +229,13 @@ impl<'a> ProbeRunner<'a> {
 
     fn validate_backend(&self, record: &CatalogIntrinsic) -> Result<()> {
         validate_backend_identity(
-            self.mode,
             &record.backend.version,
-            &record.backend.sha256,
+            &self.expected_commit,
             &self.identity,
         )
     }
 
-    fn run(&self, record: &CatalogIntrinsic) -> Result<()> {
+    fn run(&self, record: &CatalogIntrinsic, per_target: bool) -> Result<usize> {
         let intrinsic_id = &record.id;
         let input = self.output_dir.join(format!("{intrinsic_id}.ll"));
         fs::write(
@@ -207,7 +245,7 @@ impl<'a> ProbeRunner<'a> {
         .with_context(|| format!("write in-memory probe {}", input.display()))?;
 
         if record.llvm.is_some()
-            && self.mode == ProbeMode::SelectedEvidence
+            && self.identity.is_selected_evidence()
             && uses_typed_llvm_nvptx_lowering(record)
         {
             assert_intrinsic_declaration_canonicalizes(
@@ -218,12 +256,51 @@ impl<'a> ProbeRunner<'a> {
                 record,
             )?;
         }
-        let output = self.output_dir.join(format!("{intrinsic_id}.ptx"));
-        let status = Command::new(&self.llc)
-            .arg(&input)
+        let targets = if per_target && record.target.targets.contains('|') {
+            record.target.targets.split('|').collect::<Vec<_>>()
+        } else {
+            vec![record.backend.gpu_target.as_str()]
+        };
+        let target_count = targets.len();
+        for gpu_target in targets {
+            self.run_target(record, &input, gpu_target, per_target)?;
+        }
+        Ok(target_count)
+    }
+
+    fn run_target(
+        &self,
+        record: &CatalogIntrinsic,
+        input: &Path,
+        gpu_target: &str,
+        per_target: bool,
+    ) -> Result<()> {
+        let intrinsic_id = &record.id;
+        let selected_evidence_target = gpu_target == record.backend.gpu_target;
+        let (ptx_feature, effective_floor) = if !per_target || selected_evidence_target {
+            (
+                Some(record.backend.ptx_feature.clone()),
+                record.target.minimum_ptx.encoded(),
+            )
+        } else {
+            derived_ptx_feature(gpu_target, record.target.minimum_ptx.encoded()).with_context(
+                || format!("derive PTX configuration for {intrinsic_id} target {gpu_target}"),
+            )?
+        };
+        let output = self.output_dir.join(if per_target {
+            format!("{intrinsic_id}.{gpu_target}.ptx")
+        } else {
+            format!("{intrinsic_id}.ptx")
+        });
+        let mut command = Command::new(&self.llc);
+        command
+            .arg(input)
             .arg("-march=nvptx64")
-            .arg(format!("-mcpu={}", record.backend.gpu_target))
-            .arg(format!("-mattr={}", record.backend.ptx_feature))
+            .arg(format!("-mcpu={gpu_target}"));
+        if let Some(ptx_feature) = &ptx_feature {
+            command.arg(format!("-mattr={ptx_feature}"));
+        }
+        let status = command
             .arg("-o")
             .arg(&output)
             .status()
@@ -239,8 +316,13 @@ impl<'a> ProbeRunner<'a> {
                     .iter()
                     .any(|stage| stage.stage == EvidenceStageKind::PtxAssembly)
         });
-        if self.mode == ProbeMode::SelectedEvidence && has_terminal_stage {
-            if self.skip_terminal {
+        if self.identity.is_selected_evidence() && has_terminal_stage {
+            if !selected_evidence_target {
+                println!(
+                    "derived target {gpu_target} is LLVM-selection-only; terminal assembly evidence exists only for selected target {}",
+                    record.backend.gpu_target
+                );
+            } else if self.skip_terminal {
                 println!(
                     "backend-only probe: `--skip-terminal` was explicit, so recorded ptxas evidence was not revalidated"
                 );
@@ -248,22 +330,52 @@ impl<'a> ProbeRunner<'a> {
                 assemble_probe_ptx(record, &output, &self.output_dir, intrinsic_id)?;
             }
         }
-        match self.mode {
-            ProbeMode::SelectedEvidence => println!(
-                "selected evidence backend {} (SHA-256 {}) lowered {} to `{}` for {} {}",
-                self.identity.version,
-                self.identity.sha256,
+        let ptx_configuration = ptx_feature.unwrap_or_else(|| {
+            format!(
+                "target default (effective floor PTX {}.{})",
+                effective_floor / 10,
+                effective_floor % 10
+            )
+        });
+        let tool = self.identity.tool();
+        match &self.identity {
+            ProbeBackendIdentity::SelectedEvidence(identity) if selected_evidence_target => {
+                println!(
+                    "selected evidence backend {} (rustc commit {}; llc SHA-256 {}) lowered {} to `{}` for selected evidence target {} {}",
+                    tool.version,
+                    identity.rustc_commit,
+                    tool.sha256,
+                    intrinsic_id,
+                    record.expected_ptx,
+                    gpu_target,
+                    ptx_configuration,
+                )
+            }
+            ProbeBackendIdentity::SelectedEvidence(identity) => println!(
+                "selected evidence backend {} (rustc commit {}; llc SHA-256 {}) lowered {} to `{}` for derived target {} {}; record evidence selects {} {}",
+                tool.version,
+                identity.rustc_commit,
+                tool.sha256,
                 intrinsic_id,
                 record.expected_ptx,
+                gpu_target,
+                ptx_configuration,
                 record.backend.gpu_target,
                 record.backend.ptx_feature,
             ),
-            ProbeMode::Comparison => println!(
-                "comparison backend {} (SHA-256 {}) lowered {} to `{}` for {} {}; this does not validate selected evidence {} (SHA-256 {})",
-                self.identity.version,
-                self.identity.sha256,
+            ProbeBackendIdentity::Comparison(_) => println!(
+                "comparison backend {} (SHA-256 {}) lowered {} to `{}` for {} target {} {}; record evidence selects {} {}; this does not validate selected evidence {} (SHA-256 {})",
+                tool.version,
+                tool.sha256,
                 intrinsic_id,
                 record.expected_ptx,
+                if selected_evidence_target {
+                    "evidence-selected"
+                } else {
+                    "derived"
+                },
+                gpu_target,
+                ptx_configuration,
                 record.backend.gpu_target,
                 record.backend.ptx_feature,
                 record.backend.version,
@@ -275,14 +387,42 @@ impl<'a> ProbeRunner<'a> {
     }
 }
 
+fn derived_ptx_feature(gpu_target: &str, instruction_floor: u16) -> Result<(Option<String>, u16)> {
+    ensure!(
+        gpu_target.starts_with("sm_"),
+        "unsupported catalog GPU target {gpu_target:?}"
+    );
+    let arch = CudaArch::from_str(gpu_target).context("parse derived catalog GPU target")?;
+    let target_floor = recorded_ptx_floor(&arch).with_context(|| {
+        format!(
+            "derived target {gpu_target} has no recorded PTX ISA floor; cannot derive the PTX configuration production uses"
+        )
+    })?;
+    if instruction_floor <= 60 {
+        return Ok((None, target_floor));
+    }
+    let spelling = PtxSpelling::round_up(instruction_floor).with_context(|| {
+        format!("instruction PTX floor {instruction_floor} has no supported llc feature spelling")
+    })?;
+    match spelling.feature_beyond_floor(target_floor) {
+        Some(feature) => Ok((Some(feature.to_string()), spelling.get())),
+        None => Ok((None, target_floor)),
+    }
+}
+
+struct BackendExpectation<'a> {
+    intrinsic_id: &'a str,
+    version: &'a str,
+}
+
 fn validate_backend_identities<'a>(
-    mode: ProbeMode,
-    identities: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>,
-    actual: &LlcIdentity,
+    actual: &ProbeBackendIdentity,
+    expected_commit: &RustcCommit,
+    identities: impl IntoIterator<Item = BackendExpectation<'a>>,
 ) -> Result<()> {
-    for (intrinsic_id, expected_version, expected_sha256) in identities {
-        validate_backend_identity(mode, expected_version, expected_sha256, actual)
-            .with_context(|| format!("validate probe backend for {intrinsic_id}"))?;
+    for expectation in identities {
+        validate_backend_identity(expectation.version, expected_commit, actual)
+            .with_context(|| format!("validate probe backend for {}", expectation.intrinsic_id))?;
     }
     Ok(())
 }
@@ -646,7 +786,7 @@ fn validate_candidate_cubin(cubin: &Path) -> Result<()> {
     Ok(())
 }
 
-fn candidate_tool(role: &str, path: &Path, identity: &LlcIdentity) -> CandidateToolDraft {
+fn candidate_tool(role: &str, path: &Path, identity: &ToolIdentity) -> CandidateToolDraft {
     CandidateToolDraft {
         role: role.into(),
         path: path.display().to_string(),
@@ -734,7 +874,7 @@ fn candidate_artifact(
 
 fn validate_probe_instructions(record: &CatalogIntrinsic, ptx: &str) -> Result<()> {
     ensure!(
-        record.expected_ptx.matches(ptx),
+        record.expected_ptx.matches(ptx)?,
         "probe PTX has no instruction matching `{}`",
         record.expected_ptx
     );
@@ -746,6 +886,9 @@ fn validate_probe_instructions(record: &CatalogIntrinsic, ptx: &str) -> Result<(
     }
     if record.family == "elect" {
         validate_register_and_immediate_forms(&record.expected_ptx, 1, "-1", ptx)?;
+    }
+    if record.family == "counted_barrier" {
+        validate_two_register_and_immediate_forms(&record.expected_ptx, 0, "1", 1, "32", ptx)?;
     }
     if record.warp_barrier.is_some() {
         validate_register_and_immediate_forms(&record.expected_ptx, 0, "-1", ptx)?;
@@ -772,6 +915,7 @@ fn validate_probe_instructions(record: &CatalogIntrinsic, ptx: &str) -> Result<(
     }
     if let Some(mma) = &record.sparse_mma {
         let selectors: &[u32] = match mma.selector {
+            SparseMmaSelector::ImmediateZeroThroughThree => &[0, 1, 2, 3],
             SparseMmaSelector::ImmediateZeroOrOne => &[0, 1],
             SparseMmaSelector::ImmediateZero => &[0],
         };
@@ -789,7 +933,7 @@ fn uses_typed_llvm_nvptx_lowering(record: &CatalogIntrinsic) -> bool {
 }
 
 fn validate_exact_pure_instruction(expected: &InstructionPattern, ptx: &str) -> Result<()> {
-    let instructions = instructions_with_matching_head(ptx, expected);
+    let instructions = instructions_with_matching_head(ptx, expected)?;
     ensure!(
         instructions.len() == 1,
         "packed pure probe must contain exactly one `{}` instruction; found {}",
@@ -802,7 +946,7 @@ fn validate_exact_pure_instruction(expected: &InstructionPattern, ptx: &str) -> 
         instructions.len()
     );
     ensure!(
-        matching_instructions(ptx, expected).len() == 1,
+        matching_instructions(ptx, expected)?.len() == 1,
         "packed pure probe instruction does not match `{expected}`"
     );
     ensure!(
@@ -825,7 +969,7 @@ fn validate_sparse_mma_selectors(
         *selector == OperandPattern::Immediate,
         "sparse MMA selector must be an immediate operand"
     );
-    let instructions = instructions_with_matching_head(ptx, expected);
+    let instructions = instructions_with_matching_head(ptx, expected)?;
     ensure!(
         instructions.len() == selectors.len(),
         "sparse MMA probe must contain exactly {} matching instructions; found {}",
@@ -844,7 +988,7 @@ fn validate_sparse_mma_selectors(
             value: selector.to_string(),
         };
         ensure!(
-            matching_instructions(ptx, &pattern).len() == 1,
+            matching_instructions(ptx, &pattern)?.len() == 1,
             "sparse MMA probe PTX must contain exactly one selector {selector} form matching `{pattern}`"
         );
     }
@@ -883,7 +1027,7 @@ fn validate_wide_warp_shuffle_recipe(
         "wide shuffle expected PTX must be `lo, lo, <register>, {clamp}, <register>`"
     );
 
-    let all_shuffles = instructions_with_matching_head(ptx, expected);
+    let all_shuffles = instructions_with_matching_head(ptx, expected)?;
     ensure!(
         all_shuffles.len() == 2,
         "wide shuffle probe must contain exactly two `{}` instructions; found {}",
@@ -896,7 +1040,7 @@ fn validate_wide_warp_shuffle_recipe(
         all_shuffles.len()
     );
 
-    let low = matching_instructions(ptx, expected);
+    let low = matching_instructions(ptx, expected)?;
     ensure!(
         low.len() == 1,
         "wide shuffle probe must contain exactly one low-half instruction matching `{expected}`"
@@ -904,7 +1048,7 @@ fn validate_wide_warp_shuffle_recipe(
     let mut high_pattern = expected.clone();
     high_pattern.operands[0] = OperandPattern::Exact { value: "hi".into() };
     high_pattern.operands[1] = OperandPattern::Exact { value: "hi".into() };
-    let high = matching_instructions(ptx, &high_pattern);
+    let high = matching_instructions(ptx, &high_pattern)?;
     ensure!(
         high.len() == 1,
         "wide shuffle probe must contain exactly one high-half instruction matching `{high_pattern}`"
@@ -934,8 +1078,8 @@ fn validate_wide_warp_shuffle_recipe(
             },
         ],
     };
-    let split = matching_instructions(ptx, &split_pattern);
-    let reassemble = matching_instructions(ptx, &reassemble_pattern);
+    let split = matching_instructions(ptx, &split_pattern)?;
+    let reassemble = matching_instructions(ptx, &reassemble_pattern)?;
     ensure!(
         split.len() == 1,
         "wide shuffle probe must contain exactly one split matching `{split_pattern}`"
@@ -992,11 +1136,11 @@ fn validate_register_and_immediate_forms(
     };
 
     ensure!(
-        register.matches(ptx),
+        register.matches(ptx)?,
         "probe PTX has no register form matching `{register}`"
     );
     ensure!(
-        immediate_pattern.matches(ptx),
+        immediate_pattern.matches(ptx)?,
         "probe PTX has no immediate form matching `{immediate_pattern}`"
     );
     Ok(())
@@ -1057,7 +1201,7 @@ fn validate_two_register_and_immediate_forms(
         pattern.operands[first_operand_index] = first;
         pattern.operands[second_operand_index] = second;
         ensure!(
-            pattern.matches(ptx),
+            pattern.matches(ptx)?,
             "probe PTX has no {name} form matching `{pattern}`"
         );
     }
@@ -1276,14 +1420,28 @@ fn assert_canonical_intrinsic_declaration(canonical: &str, llvm: &CatalogLlvm) -
         }
     }
 
-    let memory = canonical_memory_attribute(
-        no_memory,
-        argument_memory_only,
-        inaccessible_memory_only,
-        reads_memory,
-        writes_memory,
-    )?;
-    if has_side_effects {
+    // TableGen's `IntrHasSideEffects` deliberately suppresses the otherwise
+    // inferred `memory(none)` attribute: the instruction has an observable
+    // non-memory effect and must not become removable as a readnone call.
+    // Other imported memory effects still have to canonicalize exactly.
+    let sideeffect_only = has_side_effects
+        && no_memory
+        && !argument_memory_only
+        && !inaccessible_memory_only
+        && !reads_memory
+        && !writes_memory;
+    let memory = if sideeffect_only {
+        None
+    } else {
+        canonical_memory_attribute(
+            no_memory,
+            argument_memory_only,
+            inaccessible_memory_only,
+            reads_memory,
+            writes_memory,
+        )?
+    };
+    if has_side_effects && !sideeffect_only {
         let memory = memory.as_deref().with_context(|| {
             format!(
                 "@{symbol} IntrHasSideEffects requires a concrete non-`memory(none)` canonical memory effect"
@@ -1513,12 +1671,11 @@ fn assemble_probe_ptx(
                 .find(|stage| stage.stage == EvidenceStageKind::PtxAssembly)
         })
         .context("selected LLVM evidence has no PTX-assembly stage")?;
-    let tool = PathBuf::from(
-        stage
-            .tool_path
-            .as_deref()
-            .context("PTX-assembly stage has no tool path")?,
-    );
+    let recorded_tool = stage
+        .tool_path
+        .as_deref()
+        .context("PTX-assembly stage has no tool path")?;
+    let tool = resolve_evidence_tool(recorded_tool)?;
     let expected_sha256 = stage
         .tool_sha256
         .as_deref()
@@ -1549,7 +1706,40 @@ fn assemble_probe_ptx(
     Ok(())
 }
 
-fn llc_identity(llc: &Path) -> Result<LlcIdentity> {
+fn resolve_evidence_tool(recorded: &str) -> Result<PathBuf> {
+    resolve_evidence_tool_with_path(recorded, std::env::var_os("PATH").as_deref())
+}
+
+fn resolve_evidence_tool_with_path(
+    recorded: &str,
+    search_path: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf> {
+    let recorded = PathBuf::from(recorded);
+    let has_directory = recorded
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty());
+    if recorded.is_absolute() || has_directory {
+        ensure!(
+            recorded.is_file(),
+            "recorded evidence tool does not exist: {}",
+            recorded.display()
+        );
+        return Ok(recorded);
+    }
+
+    let search_path = search_path.context("PATH is unset; cannot resolve evidence tool")?;
+    std::env::split_paths(search_path)
+        .map(|directory| directory.join(&recorded))
+        .find(|candidate| candidate.is_file())
+        .with_context(|| {
+            format!(
+                "evidence tool {:?} was not found on PATH",
+                recorded.as_os_str()
+            )
+        })
+}
+
+fn llc_identity(llc: &Path) -> Result<ToolIdentity> {
     let version = Command::new(llc)
         .arg("--version")
         .output()
@@ -1565,13 +1755,13 @@ fn llc_identity(llc: &Path) -> Result<LlcIdentity> {
         .context("llc --version did not report an LLVM version")?
         .trim()
         .to_owned();
-    Ok(LlcIdentity {
+    Ok(ToolIdentity {
         version,
         sha256: sha256_file(llc)?,
     })
 }
 
-fn ptxas_identity(ptxas: &Path) -> Result<LlcIdentity> {
+fn ptxas_identity(ptxas: &Path) -> Result<ToolIdentity> {
     let output = Command::new(ptxas)
         .arg("--version")
         .output()
@@ -1584,7 +1774,7 @@ fn ptxas_identity(ptxas: &Path) -> Result<LlcIdentity> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let version = parse_ptxas_version(&stdout, &stderr)?;
-    Ok(LlcIdentity {
+    Ok(ToolIdentity {
         version,
         sha256: sha256_file(ptxas)?,
     })
@@ -1610,28 +1800,27 @@ fn parse_ptxas_version(stdout: &str, stderr: &str) -> Result<String> {
 }
 
 fn validate_backend_identity(
-    mode: ProbeMode,
     expected_version: &str,
-    expected_sha256: &str,
-    actual: &LlcIdentity,
+    expected_commit: &RustcCommit,
+    actual: &ProbeBackendIdentity,
 ) -> Result<()> {
-    if mode == ProbeMode::Comparison {
+    let ProbeBackendIdentity::SelectedEvidence(actual) = actual else {
         return Ok(());
-    }
+    };
     ensure!(
-        actual.version == expected_version,
+        actual.tool.version == expected_version,
         "rust-toolchain llc version mismatch: selected evidence records {expected_version:?}, found {:?}; use an explicit `--llc` only for a comparison probe",
-        actual.version
+        actual.tool.version
     );
     ensure!(
-        actual.sha256 == expected_sha256,
-        "rust-toolchain llc SHA-256 mismatch: selected evidence records {expected_sha256}, found {}; use an explicit `--llc` only for a comparison probe",
-        actual.sha256
+        actual.rustc_commit == *expected_commit,
+        "rust-toolchain commit mismatch: upstream.lock records {expected_commit}, found {}; use an explicit `--llc` only for a comparison probe",
+        actual.rustc_commit
     );
     Ok(())
 }
 
-fn rust_toolchain_llc() -> Result<PathBuf> {
+fn rust_toolchain_llc() -> Result<(PathBuf, RustcCommit)> {
     let sysroot = Command::new("rustc")
         .args(["--print", "sysroot"])
         .output()
@@ -1642,11 +1831,8 @@ fn rust_toolchain_llc() -> Result<PathBuf> {
         .output()
         .context("query rustc host")?;
     ensure!(verbose.status.success(), "rustc -vV failed");
-    let host = String::from_utf8_lossy(&verbose.stdout)
-        .lines()
-        .find_map(|line| line.strip_prefix("host: "))
-        .context("rustc -vV did not report a host")?
-        .to_owned();
+    let verbose = String::from_utf8_lossy(&verbose.stdout);
+    let (host, commit) = parse_rustc_verbose(&verbose)?;
     let path = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim())
         .join("lib/rustlib")
         .join(host)
@@ -1656,12 +1842,73 @@ fn rust_toolchain_llc() -> Result<PathBuf> {
         "rust toolchain has no llc at {}",
         path.display()
     );
-    Ok(path)
+    Ok((path, commit))
+}
+
+fn parse_rustc_verbose(stdout: &str) -> Result<(String, RustcCommit)> {
+    let host = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .context("rustc -vV did not report a host")?
+        .to_owned();
+    let commit = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("commit-hash: "))
+        .context("rustc -vV did not report a commit-hash")?
+        .parse()
+        .map_err(anyhow::Error::msg)
+        .context("parse rustc -vV commit-hash")?;
+    Ok((host, commit))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derived_target_uses_default_when_it_meets_the_floor() {
+        assert_eq!(derived_ptx_feature("sm_90a", 78).unwrap(), (None, 80));
+        assert_eq!(derived_ptx_feature("sm_100a", 86).unwrap(), (None, 86));
+        assert_eq!(derived_ptx_feature("sm_100f", 86).unwrap(), (None, 88));
+        assert_eq!(derived_ptx_feature("sm_103f", 86).unwrap(), (None, 88));
+        assert_eq!(derived_ptx_feature("sm_110a", 86).unwrap(), (None, 90));
+        assert_eq!(derived_ptx_feature("sm_120a", 86).unwrap(), (None, 87));
+        assert_eq!(derived_ptx_feature("sm_121f", 87).unwrap(), (None, 88));
+    }
+
+    #[test]
+    fn derived_target_rejects_canonical_unknown_architecture() {
+        let error = derived_ptx_feature("sm_999a", 90).unwrap_err();
+        assert!(error.to_string().contains("sm_999a"), "{error:#}");
+        assert!(
+            error.to_string().contains("no recorded PTX ISA floor"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn derived_target_raises_a_default_below_the_instruction_floor() {
+        assert_eq!(
+            derived_ptx_feature("sm_80", 88).unwrap(),
+            (Some("+ptx88".into()), 88)
+        );
+    }
+
+    #[test]
+    fn derived_target_rounds_like_production() {
+        assert_eq!(
+            derived_ptx_feature("sm_80", 74).unwrap(),
+            (Some("+ptx78".into()), 78)
+        );
+        assert_eq!(
+            derived_ptx_feature("sm_87", 74).unwrap(),
+            (Some("+ptx78".into()), 78)
+        );
+        assert_eq!(
+            derived_ptx_feature("sm_75", 63).unwrap(),
+            (Some("+ptx65".into()), 65)
+        );
+    }
     use crate::model::{
         CatalogHalfOpenRange, CatalogHardwareAlternative, CatalogHardwareTarget,
         CatalogLlvmResultFacts,
@@ -1988,62 +2235,92 @@ mod tests {
         assert!(error.to_string().contains("expected PTX must be"));
     }
 
-    fn identity() -> LlcIdentity {
-        LlcIdentity {
+    fn commit(value: &str) -> RustcCommit {
+        value.parse().unwrap()
+    }
+
+    fn tool_identity() -> ToolIdentity {
+        ToolIdentity {
             version: "LLVM version 22.1.2-test".into(),
             sha256: "abc123".into(),
         }
     }
 
+    fn selected_identity(commit_hash: &str) -> ProbeBackendIdentity {
+        ProbeBackendIdentity::SelectedEvidence(SelectedBackendIdentity {
+            tool: tool_identity(),
+            rustc_commit: commit(commit_hash),
+        })
+    }
+
     #[test]
-    fn selected_probe_requires_exact_recorded_backend() {
+    fn selected_probe_accepts_same_version_and_commit_with_different_llc_sha256() {
         validate_backend_identity(
-            ProbeMode::SelectedEvidence,
             "LLVM version 22.1.2-test",
-            "abc123",
-            &identity(),
+            &commit("1111111111111111111111111111111111111111"),
+            &ProbeBackendIdentity::SelectedEvidence(SelectedBackendIdentity {
+                tool: ToolIdentity {
+                    sha256: "different".into(),
+                    ..tool_identity()
+                },
+                rustc_commit: commit("1111111111111111111111111111111111111111"),
+            }),
         )
         .unwrap();
+    }
 
+    #[test]
+    fn selected_probe_rejects_different_commit() {
+        let commit_error = validate_backend_identity(
+            "LLVM version 22.1.2-test",
+            &commit("2222222222222222222222222222222222222222"),
+            &selected_identity("1111111111111111111111111111111111111111"),
+        )
+        .unwrap_err();
+        assert!(commit_error.to_string().contains("commit"));
+    }
+
+    #[test]
+    fn selected_probe_rejects_different_version() {
         let version_error = validate_backend_identity(
-            ProbeMode::SelectedEvidence,
             "LLVM version 21",
-            "abc123",
-            &identity(),
+            &commit("1111111111111111111111111111111111111111"),
+            &selected_identity("1111111111111111111111111111111111111111"),
         )
         .unwrap_err();
         assert!(version_error.to_string().contains("version mismatch"));
-
-        let hash_error = validate_backend_identity(
-            ProbeMode::SelectedEvidence,
-            "LLVM version 22.1.2-test",
-            "different",
-            &identity(),
-        )
-        .unwrap_err();
-        assert!(hash_error.to_string().contains("SHA-256 mismatch"));
     }
 
     #[test]
     fn all_probe_preflight_checks_every_backend_identity() {
         let error = validate_backend_identities(
-            ProbeMode::SelectedEvidence,
+            &selected_identity("1111111111111111111111111111111111111111"),
+            &commit("1111111111111111111111111111111111111111"),
             [
-                ("first", "LLVM version 22.1.2-test", "abc123"),
-                ("last", "LLVM version 22.1.2-test", "different"),
+                BackendExpectation {
+                    intrinsic_id: "first",
+                    version: "LLVM version 22.1.2-test",
+                },
+                BackendExpectation {
+                    intrinsic_id: "last",
+                    version: "LLVM version 21",
+                },
             ],
-            &identity(),
         )
         .unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("validate probe backend for last"));
-        assert!(message.contains("SHA-256 mismatch"));
+        assert!(message.contains("version mismatch"));
     }
 
     #[test]
     fn explicit_probe_is_always_comparison_only() {
-        validate_backend_identity(ProbeMode::Comparison, "different", "different", &identity())
-            .unwrap();
+        validate_backend_identity(
+            "different",
+            &commit("2222222222222222222222222222222222222222"),
+            &ProbeBackendIdentity::Comparison(tool_identity()),
+        )
+        .unwrap();
     }
 
     fn llvm_facts(
@@ -2173,7 +2450,7 @@ attributes #0 = { convergent nocallback nounwind memory(inaccessiblemem: readwri
     }
 
     #[test]
-    fn side_effects_without_a_concrete_memory_effect_fail_closed() {
+    fn side_effects_require_memory_unless_tablegen_marks_them_no_memory() {
         let llvm = llvm_facts(
             "llvm.nvvm.activemask",
             None,
@@ -2199,10 +2476,9 @@ attributes #0 = { convergent nocallback nounwind memory(inaccessiblemem: readwri
         );
         let canonical = r#"
 declare i32 @llvm.nvvm.activemask() #0
-attributes #0 = { nounwind memory(none) }
+attributes #0 = { nounwind }
 "#;
-        let error = assert_canonical_intrinsic_declaration(canonical, &no_memory).unwrap_err();
-        assert!(error.to_string().contains("concrete non-`memory(none)`"));
+        assert_canonical_intrinsic_declaration(canonical, &no_memory).unwrap();
     }
 
     #[test]
@@ -2505,6 +2781,20 @@ attributes #0 = { speculatable memory(none) }
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn portable_evidence_tool_names_resolve_through_path() {
+        let temp = candidate_tool_test_dir();
+        let expected = write_fake_tool(&temp.0, "ptxas", "#!/bin/sh\nexit 0\n");
+        let search_path = std::env::join_paths([&temp.0]).unwrap();
+
+        assert_eq!(
+            resolve_evidence_tool_with_path("ptxas", Some(&search_path)).unwrap(),
+            expected
+        );
+        assert!(resolve_evidence_tool_with_path("missing-tool", Some(&search_path)).is_err());
+    }
+
     #[test]
     fn ptxas_version_requires_the_nvidia_banner_and_cuda_release() {
         let valid = "ptxas: NVIDIA (R) Ptx optimizing assembler\n\
@@ -2521,6 +2811,30 @@ attributes #0 = { speculatable memory(none) }
         ] {
             assert!(parse_ptxas_version(invalid, "").is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn rustc_verbose_requires_a_concrete_commit_hash() {
+        let valid = "rustc 1.100.0-nightly (e457a7b0d 2026-08-27)\n\
+                     binary: rustc\n\
+                     commit-hash: e457a7b0d326d67b4322ef0d11bd715cfaeda48f\n\
+                     commit-date: 2026-08-27\n\
+                     host: x86_64-unknown-linux-gnu\n\
+                     release: 1.100.0-nightly\n\
+                     LLVM version: 23.1.0\n";
+        let (host, commit) = parse_rustc_verbose(valid).unwrap();
+        assert_eq!(host, "x86_64-unknown-linux-gnu");
+        assert_eq!(
+            commit,
+            "e457a7b0d326d67b4322ef0d11bd715cfaeda48f".parse().unwrap()
+        );
+
+        let missing = parse_rustc_verbose("host: x86_64-unknown-linux-gnu\n").unwrap_err();
+        assert!(missing.to_string().contains("commit-hash"));
+
+        let unknown = parse_rustc_verbose("commit-hash: unknown\nhost: x86_64-unknown-linux-gnu\n")
+            .unwrap_err();
+        assert!(format!("{unknown:#}").contains("commit-hash"));
     }
 
     #[cfg(unix)]

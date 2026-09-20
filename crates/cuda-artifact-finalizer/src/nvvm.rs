@@ -5,8 +5,8 @@
 
 use crate::options::FinalizationOptions;
 use crate::provenance::{
-    StableDigest, compiler_provenance_digest, digest_bytes, digest_file_handle, recipe_digest,
-    with_revalidated_tool_identity,
+    PinnedToolProvenance, StableDigest, compiler_provenance_digest, digest_bytes,
+    digest_file_handle, recipe_digest, with_revalidated_tool_identity,
 };
 use crate::{FinalizerError, validate_name};
 use libnvvm_sys::{LibNvvm, Program, find_libdevice};
@@ -31,6 +31,12 @@ pub struct NvvmCompiler {
 impl NvvmCompiler {
     /// Discover and pin libNVVM, then read the selected libdevice bytes.
     pub fn discover() -> Result<Self, FinalizerError> {
+        Self::discover_with_expected(None)
+    }
+
+    pub(crate) fn discover_with_expected(
+        expected: Option<&PinnedToolProvenance>,
+    ) -> Result<Self, FinalizerError> {
         let path = find_libdevice().map_err(|libnvvm_sys::LibdeviceNotFound { tried }| {
             FinalizerError::LibdeviceNotFound { tried }
         })?;
@@ -40,9 +46,18 @@ impl NvvmCompiler {
         })?;
         let libdevice_digest = digest_bytes(&libdevice);
         Ok(Self {
-            tool: load_nvvm_tool()?,
+            tool: load_nvvm_tool(expected)?,
             libdevice: libdevice.into(),
             libdevice_digest,
+        })
+    }
+
+    pub(crate) fn pinned_tool_provenance(&self) -> Option<PinnedToolProvenance> {
+        let sha256 = self.tool.digest?;
+        let file = self.tool.library.loaded_file_if_unchanged()?;
+        Some(PinnedToolProvenance {
+            sha256,
+            file: crate::provenance::ToolFileIdentity::capture(file)?,
         })
     }
 
@@ -94,9 +109,9 @@ impl NvvmCompiler {
                 program.add_module(&self.libdevice, "libdevice.10.bc")?;
                 program.add_module(nvvm_ir, module_name)?;
 
-                let verify = options.nvvm_verify_options();
-                let verify_refs = verify.iter().map(String::as_str).collect::<Vec<_>>();
-                program.verify(&verify_refs)?;
+                // Compilation is the authoritative acceptance boundary.
+                // nvvmVerifyProgram rejects atomic loads and stores that the
+                // same libNVVM installation can compile successfully.
                 let compile = options.nvvm_compile_options();
                 let compile_refs = compile.iter().map(String::as_str).collect::<Vec<_>>();
                 Ok(program.compile(&compile_refs)?)
@@ -123,8 +138,8 @@ impl NvvmCompiler {
 }
 
 fn current_nvvm_tool_digest(tool: &LoadedNvvmTool) -> Option<[u8; 32]> {
-    let file = tool.library.loaded_file_if_unchanged()?;
-    digest_file_handle(file).ok()
+    tool.library.loaded_file_if_unchanged()?;
+    tool.digest
 }
 
 fn validate_nvvm_frontend(
@@ -160,7 +175,9 @@ fn validate_nvvm_frontend(
     Ok(())
 }
 
-fn load_nvvm_tool() -> Result<Arc<LoadedNvvmTool>, FinalizerError> {
+fn load_nvvm_tool(
+    expected: Option<&PinnedToolProvenance>,
+) -> Result<Arc<LoadedNvvmTool>, FinalizerError> {
     if let Some(loaded) = NVVM_TOOL.get() {
         return Ok(Arc::clone(loaded));
     }
@@ -173,7 +190,8 @@ fn load_nvvm_tool() -> Result<Arc<LoadedNvvmTool>, FinalizerError> {
     }
 
     let library = LibNvvm::load_for_cache()?;
-    let digest = loaded_tool_digest("libNVVM", library.loaded_file_if_unchanged());
+    let digest =
+        loaded_tool_digest_with_expected("libNVVM", library.loaded_file_if_unchanged(), expected);
     let digest = if digest.is_some() && library.loaded_file_if_unchanged().is_none() {
         report_changed_tool("libNVVM");
         None
@@ -210,6 +228,18 @@ pub(crate) fn loaded_tool_digest(label: &str, file: Option<&std::fs::File>) -> O
     }
 }
 
+pub(crate) fn loaded_tool_digest_with_expected(
+    label: &str,
+    file: Option<&std::fs::File>,
+    expected: Option<&PinnedToolProvenance>,
+) -> Option<[u8; 32]> {
+    expected
+        .filter(|expected| expected.file.has_unix_identity())
+        .filter(|expected| file.is_some_and(|file| expected.file.matches_file(file)))
+        .map(|expected| expected.sha256)
+        .or_else(|| loaded_tool_digest(label, file))
+}
+
 pub(crate) fn report_changed_tool(label: &str) {
     if std::env::var_os("CUDA_OXIDE_VERBOSE").is_some() {
         eprintln!(
@@ -232,9 +262,6 @@ pub(crate) fn nvvm_ir_artifact_digest_parts(
         .field("module", nvvm_ir)
         .field("module-order", b"libdevice.10.bc,user-nvvm-ir")
         .field("libdevice-sha256", libdevice_digest);
-    for option in options.nvvm_verify_options() {
-        digest = digest.field("nvvm-verify-option", option.as_bytes());
-    }
     for option in options.nvvm_compile_options() {
         digest = digest.field("nvvm-compile-option", option.as_bytes());
     }
@@ -244,6 +271,38 @@ pub(crate) fn nvvm_ir_artifact_digest_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MODERN_ATOMIC_LOAD_NVVM_IR: &[u8] = br#"
+target datalayout = "e-p:64:64:64-p3:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-f128:128:128-v16:16:16-v32:32:32-v64:64:64-v128:128-n16:32:64-a:8:8"
+target triple = "nvptx64-nvidia-cuda"
+
+define void @kernel(ptr %value) {
+entry:
+  %loaded = load atomic i32, ptr %value syncscope("device") acquire, align 4
+  ret void
+}
+
+!nvvm.annotations = !{!0}
+!nvvmir.version = !{!1}
+!0 = !{ptr @kernel, !"kernel", i32 1}
+!1 = !{i32 2, i32 0, i32 3, i32 2}
+"#;
+
+    const MALFORMED_MODERN_NVVM_IR: &[u8] = br#"
+target datalayout = "e-p:64:64:64-p3:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-f128:128:128-v16:16:16-v32:32:32-v64:64:64-v128:128-n16:32:64-a:8:8"
+target triple = "nvptx64-nvidia-cuda"
+
+define void @kernel() {
+entry:
+  %invalid = add i32 1, ptr null
+  ret void
+}
+
+!nvvm.annotations = !{!0}
+!nvvmir.version = !{!1}
+!0 = !{ptr @kernel, !"kernel", i32 1}
+!1 = !{i32 2, i32 0, i32 3, i32 2}
+"#;
 
     #[test]
     fn nvvm_digest_covers_module_name_bytes_options_and_libdevice() {
@@ -295,6 +354,74 @@ mod tests {
                 &[1; 32],
                 &[2; 32]
             )
+        );
+    }
+
+    #[test]
+    fn expected_digest_is_reused_only_for_the_matching_descriptor_identity() {
+        let directory = std::env::temp_dir().join(format!(
+            "cuda-artifact-finalizer-expected-digest-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let expected_path = directory.join("expected.so");
+        let other_path = directory.join("other.so");
+        std::fs::write(&expected_path, b"expected tool bytes").unwrap();
+        std::fs::write(&other_path, b"different tool bytes with another length").unwrap();
+        let expected_file = std::fs::File::open(&expected_path).unwrap();
+        let other_file = std::fs::File::open(&other_path).unwrap();
+        let expected = PinnedToolProvenance {
+            sha256: [7; 32],
+            file: crate::provenance::ToolFileIdentity::capture(&expected_file).unwrap(),
+        };
+
+        assert_eq!(
+            loaded_tool_digest_with_expected("test", Some(&expected_file), Some(&expected)),
+            Some([7; 32])
+        );
+        assert_eq!(
+            loaded_tool_digest_with_expected("test", Some(&other_file), Some(&expected)),
+            Some(digest_bytes(b"different tool bytes with another length"))
+        );
+
+        // Without the Unix identity fields (non-Unix producer), length and
+        // modification time alone must not be trusted: always rehash.
+        let mut weak = expected;
+        weak.file.device = None;
+        weak.file.inode = None;
+        weak.file.change_time_seconds = None;
+        weak.file.change_time_nanoseconds = None;
+        assert_eq!(
+            loaded_tool_digest_with_expected("test", Some(&expected_file), Some(&weak)),
+            Some(digest_bytes(b"expected tool bytes"))
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires discoverable CUDA Toolkit libNVVM and libdevice"]
+    fn live_compile_accepts_atomic_load_and_rejects_malformed_ir() {
+        let compiler = NvvmCompiler::discover().unwrap();
+        let options = FinalizationOptions::new("sm_120a".parse().unwrap());
+
+        let ltoir = compiler
+            .compile_nvvm_ir_to_ltoir("atomic-load.ll", MODERN_ATOMIC_LOAD_NVVM_IR, &options)
+            .unwrap();
+        assert!(!ltoir.is_empty());
+
+        let error = compiler
+            .compile_nvvm_ir_to_ltoir("malformed.ll", MALFORMED_MODERN_NVVM_IR, &options)
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                FinalizerError::Nvvm(libnvvm_sys::NvvmError::Call {
+                    operation: "nvvmCompileProgram",
+                    ..
+                })
+            ),
+            "unexpected error: {error}"
         );
     }
 }

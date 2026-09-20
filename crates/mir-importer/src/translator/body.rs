@@ -20,24 +20,33 @@
 //!   `#[launch_bounds(...)]`)
 
 use super::block;
+use super::facts;
 use super::types;
 use crate::error::{TranslationErr, TranslationResult};
+use crate::pipeline::StatementDebugInfoMap;
 use crate::translator::location::span_to_location;
 use crate::translator::values::{self, SlotAddrSpaceMap, ValueMap};
+use dialect_mir::attributes::ReferenceParamValidityAttr;
 use dialect_mir::ops::MirFuncOp;
 use dialect_mir::types::address_space;
 use llvm_export::export::DebugKind;
 use llvm_export::ops::{
-    DebugLocalTypeKind, DebugLocalVariableInfo, DebugSourceScopeMap, DebugTypeMember,
+    DebugEnumDiscriminant, DebugEnumVariant, DebugFragment, DebugFragmentVariableInfo,
+    DebugLocalTypeKind, DebugLocalVariableInfo, DebugProjectedVariableInfo, DebugSourcePosition,
+    DebugSourceScopeMap, DebugTypeMember, DebugWholeVariableInfo, LocalMemoryProvenanceAttr,
 };
 use pliron::basic_block::BasicBlock;
 use pliron::builtin::op_interfaces::SymbolOpInterface;
 use pliron::context::{Context, Ptr};
 use pliron::identifier::{Identifier, Legaliser};
-use pliron::input_err_noloc;
 use pliron::location::Located;
 use pliron::op::Op;
 use pliron::operation::Operation;
+use pliron::{input_err_noloc, input_error_noloc};
+use reserved_oxide_symbols::{
+    MIR_GRID_CONSTANT_ALIGN_ATTR_PREFIX, MIR_GRID_CONSTANT_POINTEE_ATTR_PREFIX,
+};
+use rustc_public::CrateDefType;
 
 // Re-export rustc_public types for convenience
 use rustc_hash::FxHashMap;
@@ -45,6 +54,7 @@ use rustc_public::CrateDef;
 use rustc_public::mir;
 use rustc_public::mir::mono;
 use rustc_public::ty::{ConstantKind, FloatTy, IntTy, RigidTy, Ty, TyKind, UintTy};
+use rustc_public_bridge::IndexedVal;
 
 /// Cluster dimensions extracted from `#[cluster(x,y,z)]` attribute.
 ///
@@ -117,7 +127,9 @@ fn detect_cluster_config(
         };
 
         let fn_name = def_id.name();
-        if fn_name != "__cluster_config" && !fn_name.ends_with("::__cluster_config") {
+        if def_id.krate().name.as_str() != "cuda_device"
+            || (fn_name != "__cluster_config" && !fn_name.ends_with("::__cluster_config"))
+        {
             continue;
         }
 
@@ -141,6 +153,71 @@ fn detect_cluster_config(
         });
     }
     None
+}
+
+/// Source parameter indices declared with `#[grid_constant]`.
+///
+/// `#[kernel]` replaces each parameter attribute with one
+/// `__grid_constant_config::<INDEX>()` marker. Indices remain source-level
+/// here; mir-lower maps them through slice scalarization to LLVM parameter
+/// positions exactly once.
+fn detect_grid_constant_params(
+    body: &mir::Body,
+    reachable: &std::collections::BTreeSet<usize>,
+    instance: &mono::Instance,
+    is_kernel: bool,
+) -> Result<Vec<usize>, String> {
+    use rustc_public::ty::TyConstKind;
+
+    let mut indices = std::collections::BTreeSet::new();
+    for &block_idx in reachable {
+        let block = &body.blocks[block_idx];
+        let mir::TerminatorKind::Call { func, .. } = &block.terminator.kind else {
+            continue;
+        };
+        let mir::Operand::Constant(constant) = func else {
+            continue;
+        };
+        let ConstantKind::ZeroSized = constant.const_.kind() else {
+            continue;
+        };
+        let TyKind::RigidTy(RigidTy::FnDef(def_id, args)) = constant.const_.ty().kind() else {
+            continue;
+        };
+        let definition_name = def_id.name();
+        if def_id.krate().name.as_str() != "cuda_device"
+            || (definition_name != "__grid_constant_config"
+                && !definition_name.ends_with("::__grid_constant_config"))
+        {
+            continue;
+        }
+        facts::validate_grid_constant_marker_owner(instance, block_idx, is_kernel)?;
+        if args.0.len() != 1 {
+            return Err(format!(
+                "cuda_device grid-constant marker has {} generic arguments; expected exactly 1",
+                args.0.len()
+            ));
+        }
+        let rustc_public::ty::GenericArgKind::Const(index) = &args.0[0] else {
+            return Err("cuda_device grid-constant parameter index is not a constant".to_string());
+        };
+        let raw = match index.kind() {
+            TyConstKind::Value(_, allocation) => allocation.read_uint().map_err(|error| {
+                format!("could not read grid-constant parameter index: {error:?}")
+            })?,
+            _ => u128::from(index.eval_target_usize().map_err(|error| {
+                format!("could not evaluate grid-constant parameter index: {error:?}")
+            })?),
+        };
+        let index = usize::try_from(raw)
+            .map_err(|_| format!("grid-constant parameter index {raw} does not fit usize"))?;
+        if !indices.insert(index) {
+            return Err(format!(
+                "kernel contains duplicate grid-constant marker for source parameter {index}"
+            ));
+        }
+    }
+    Ok(indices.into_iter().collect())
 }
 
 /// Scans MIR for `__launch_bounds_config::<MAX, MIN>()` marker and extracts launch bounds.
@@ -433,8 +510,9 @@ fn detect_dynamic_shared_alignment(
             continue;
         };
         let fn_name = def_id.name();
-        if fn_name != "__dynamic_shared_alignment"
-            && !fn_name.ends_with("::__dynamic_shared_alignment")
+        if def_id.krate().name.as_str() != "cuda_device"
+            || (fn_name != "__dynamic_shared_alignment"
+                && !fn_name.ends_with("::__dynamic_shared_alignment"))
         {
             continue;
         }
@@ -560,62 +638,413 @@ struct LocalDebugInfo {
     variable: DebugLocalVariableInfo,
     loc: pliron::location::Location,
     source_scope: u32,
+    declaration: Option<DebugSourcePosition>,
 }
 
-/// Build the first full-debug variable map.
+#[derive(Default)]
+struct CollectedDebugLocals {
+    whole: FxHashMap<mir::Local, Vec<LocalDebugInfo>>,
+    projected: FxHashMap<mir::Local, Vec<DebugProjectedVariableInfo>>,
+    fragments: FxHashMap<mir::Local, Vec<DebugFragmentVariableInfo>>,
+}
+
+/// Build full-debug bindings for whole locals, supported place projections,
+/// and rustc scalar-replacement fragments.
 ///
-/// This stage only supports simple whole-local bindings:
+/// A composite record describes one storage piece of a larger source variable.
+/// The stable MIR `composite.ty` is the complete source type and
+/// `composite.projection` identifies the piece inside it. For now fragments are
+/// accepted only when rustc stores the piece in a whole MIR local and the
+/// composite projection is a static `Field` chain. This is the scalar-replaced
+/// aggregate shape emitted by rustc and keeps the location semantics exact.
 ///
-/// ```text
-/// debug name => _3
-/// ```
-///
-/// Fragments/projections need `DIExpression(DW_OP_LLVM_fragment, ...)` and more
-/// value-location tracking, so they are intentionally skipped until the basic
-/// local/argument path is solid.
-fn collect_debug_locals(
-    ctx: &mut Context,
-    body: &mir::Body,
-) -> FxHashMap<mir::Local, LocalDebugInfo> {
-    let mut locals = FxHashMap::default();
+/// Ordinary projected bindings retain the existing support for static fields,
+/// forward constant indices, enum payload fields, and one leading thin-pointer
+/// dereference. Dynamic indices, dereference-index chains, repeated dereferences,
+/// fat pointers, slices, opaque casts, and non-field composite projections are
+/// skipped rather than approximated.
+fn collect_debug_locals(ctx: &mut Context, body: &mir::Body) -> CollectedDebugLocals {
+    let mut collected = CollectedDebugLocals::default();
 
     for info in &body.var_debug_info {
-        if info.composite.is_some() {
-            continue;
-        }
-
-        let Some(local) = info.local() else {
-            continue;
-        };
-        let local_idx: usize = local;
-        if local_idx == 0 {
-            continue;
-        }
-
-        let Some(decl) = body.local_decl(local) else {
-            continue;
-        };
-        let Some(ty) = debug_type_for_ty(&decl.ty) else {
-            continue;
-        };
-
         let name = info.name.to_string();
         if name.is_empty() {
             continue;
         }
 
-        locals.entry(local).or_insert_with(|| LocalDebugInfo {
-            variable: DebugLocalVariableInfo {
-                name,
-                argument_index: info.argument_index,
-                ty,
-            },
-            loc: span_to_location(ctx, info.source_info.span),
-            source_scope: info.source_info.scope,
-        });
+        let mir::VarDebugInfoContents::Place(place) = &info.value else {
+            continue;
+        };
+        let local = place.local;
+        let local_idx: usize = local;
+        if local_idx == 0 {
+            continue;
+        }
+
+        if let Some(composite) = &info.composite {
+            // A promoted `dbg.value` for the backing local denotes the fragment
+            // value itself. Supporting a projected storage place would require
+            // extracting that subvalue after promotion, so fail closed here.
+            if !place.projection.is_empty() {
+                continue;
+            }
+            let Some(fragment) = debug_fragment(composite) else {
+                continue;
+            };
+            let Some(ty) = debug_type_for_ty(&composite.ty) else {
+                continue;
+            };
+            if fragment.offset_bits == 0
+                && layout_size_bits(&composite.ty) == Some(fragment.size_bits)
+            {
+                collected
+                    .whole
+                    .entry(local)
+                    .or_default()
+                    .push(LocalDebugInfo {
+                        variable: DebugLocalVariableInfo {
+                            name,
+                            argument_index: info.argument_index,
+                            ty,
+                        },
+                        loc: span_to_location(ctx, info.source_info.span),
+                        source_scope: info.source_info.scope,
+                        declaration: debug_source_position(info.source_info.span),
+                    });
+                continue;
+            }
+
+            collected
+                .fragments
+                .entry(local)
+                .or_default()
+                .push(DebugFragmentVariableInfo {
+                    variable: DebugLocalVariableInfo {
+                        name,
+                        argument_index: info.argument_index,
+                        ty,
+                    },
+                    fragment,
+                    source_scope: Some(info.source_info.scope),
+                    declaration: debug_source_position(info.source_info.span),
+                });
+            continue;
+        }
+
+        if place.projection.is_empty() {
+            let Some(decl) = body.local_decl(local) else {
+                continue;
+            };
+            let Some(ty) = debug_type_for_ty(&decl.ty) else {
+                continue;
+            };
+
+            collected
+                .whole
+                .entry(local)
+                .or_default()
+                .push(LocalDebugInfo {
+                    variable: DebugLocalVariableInfo {
+                        name,
+                        argument_index: info.argument_index,
+                        ty,
+                    },
+                    loc: span_to_location(ctx, info.source_info.span),
+                    source_scope: info.source_info.scope,
+                    declaration: debug_source_position(info.source_info.span),
+                });
+            continue;
+        }
+
+        let Some(projection) = debug_projection(body, place) else {
+            continue;
+        };
+        let Some(ty) = debug_type_for_ty(&projection.ty) else {
+            continue;
+        };
+
+        // rustc treats projected argument bindings as local variables rather
+        // than formal argument variables; only whole-place arguments receive
+        // a DWARF argument index.
+        collected
+            .projected
+            .entry(local)
+            .or_default()
+            .push(DebugProjectedVariableInfo {
+                variable: DebugLocalVariableInfo {
+                    name,
+                    argument_index: None,
+                    ty,
+                },
+                dereference_base: projection.dereference_base,
+                offset_bytes: projection.offset_bytes,
+                source_scope: Some(info.source_info.scope),
+                declaration: debug_source_position(info.source_info.span),
+            });
     }
 
-    locals
+    collected
+}
+
+fn debug_fragment(fragment: &mir::VarDebugInfoFragment) -> Option<DebugFragment> {
+    let whole_size_bits = layout_size_bits(&fragment.ty)?;
+    if whole_size_bits == 0 {
+        return None;
+    }
+
+    let mut current_ty = fragment.ty;
+    let mut offset_bytes = 0u64;
+    for elem in &fragment.projection {
+        let mir::ProjectionElem::Field(field_idx, field_ty) = elem else {
+            return None;
+        };
+        let layout = current_ty.layout().ok()?;
+        let shape = layout.shape();
+        let rustc_public::abi::FieldsShape::Arbitrary { offsets } = &shape.fields else {
+            return None;
+        };
+        offset_bytes = offset_bytes.checked_add(offsets.get(*field_idx)?.bytes() as u64)?;
+        current_ty = *field_ty;
+    }
+
+    let offset_bits = offset_bytes.checked_mul(8)?;
+    let size_bits = layout_size_bits(&current_ty)?;
+    if size_bits == 0 || offset_bits.checked_add(size_bits)? > whole_size_bits {
+        return None;
+    }
+
+    Some(DebugFragment {
+        offset_bits,
+        size_bits,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct ResolvedDebugProjection {
+    dereference_base: bool,
+    offset_bytes: u64,
+    ty: Ty,
+}
+
+/// Resolve the location expression and final type of a supported MIR projection.
+///
+/// Static `Field`/forward-`ConstantIndex` chains retain the #939 behavior. A
+/// single leading `Deref` is additionally accepted when the base has one pointer
+/// word of storage; after that dereference only `Field` projections are allowed.
+/// This deliberately rejects fat references/raw pointers, repeated dereferences,
+/// and dereference-plus-index chains instead of emitting an approximate location.
+fn debug_projection(body: &mir::Body, place: &mir::Place) -> Option<ResolvedDebugProjection> {
+    let mut current_ty = body.local_decl(place.local)?.ty;
+    let mut dereference_base = false;
+    let mut offset_bytes = 0u64;
+    let mut enum_variant = None;
+
+    for (index, elem) in place.projection.iter().enumerate() {
+        match elem {
+            mir::ProjectionElem::Deref if index == 0 && !dereference_base => {
+                // CUDA device pointers are one 64-bit word. Requiring the source
+                // pointer/reference layout to match rejects fat pointers such as
+                // `&[T]`/`&str` before we model them with the wrong DWARF stack op.
+                if current_ty.layout().ok()?.shape().size.bytes() != 8 {
+                    return None;
+                }
+                current_ty = match current_ty.kind() {
+                    TyKind::RigidTy(RigidTy::RawPtr(pointee, _)) => pointee,
+                    TyKind::RigidTy(RigidTy::Ref(_, pointee, _)) => pointee,
+                    _ => return None,
+                };
+                dereference_base = true;
+            }
+            mir::ProjectionElem::Downcast(variant) => {
+                // Downcasts are supported only inside the base local: after a
+                // dereference the tested recipe allows static fields alone.
+                if enum_variant.is_some() || dereference_base {
+                    return None;
+                }
+                let TyKind::RigidTy(RigidTy::Adt(adt_def, _)) = current_ty.kind() else {
+                    return None;
+                };
+                if !matches!(adt_def.kind(), rustc_public::ty::AdtKind::Enum) {
+                    return None;
+                }
+                enum_variant = Some(variant.to_index());
+            }
+            mir::ProjectionElem::Field(field_idx, field_ty) => {
+                let layout = current_ty.layout().ok()?;
+                let shape = layout.shape();
+                let field_offset = if let Some(variant) = enum_variant.take() {
+                    crate::translator::layout::enum_variant_field_offsets(
+                        &shape,
+                        variant,
+                        pliron::location::Location::Unknown,
+                    )
+                    .ok()?
+                    .get(*field_idx)
+                    .copied()? as u64
+                } else {
+                    let rustc_public::abi::FieldsShape::Arbitrary { offsets } = &shape.fields
+                    else {
+                        return None;
+                    };
+                    offsets.get(*field_idx)?.bytes() as u64
+                };
+                offset_bytes = offset_bytes.checked_add(field_offset)?;
+                current_ty = *field_ty;
+            }
+            mir::ProjectionElem::ConstantIndex {
+                offset,
+                min_length: _,
+                from_end: false,
+            } if !dereference_base => {
+                if enum_variant.is_some() {
+                    return None;
+                }
+                let layout = current_ty.layout().ok()?;
+                let shape = layout.shape();
+                let rustc_public::abi::FieldsShape::Array { stride, count } = &shape.fields else {
+                    return None;
+                };
+                if *offset >= *count {
+                    return None;
+                }
+                let element_offset = (stride.bytes() as u64).checked_mul(*offset)?;
+                offset_bytes = offset_bytes.checked_add(element_offset)?;
+                let TyKind::RigidTy(RigidTy::Array(element, _)) = current_ty.kind() else {
+                    return None;
+                };
+                current_ty = element;
+            }
+            _ => return None,
+        }
+    }
+
+    if enum_variant.is_some() {
+        return None;
+    }
+
+    Some(ResolvedDebugProjection {
+        dereference_base,
+        offset_bytes,
+        ty: current_ty,
+    })
+}
+
+fn debug_source_position(span: rustc_public::ty::Span) -> Option<DebugSourcePosition> {
+    let file = span.get_filename();
+    let lines = span.get_lines();
+    if file.is_empty() || lines.start_line == 0 || lines.start_col == 0 {
+        return None;
+    }
+    Some(DebugSourcePosition {
+        file: std::path::PathBuf::from(file),
+        line: lines.start_line as i32,
+        column: lines.start_col as i32,
+    })
+}
+
+/// Source-level names for MIR locals, independent of the selected debug tier.
+///
+/// Full variable debug information is deliberately optional, but the local
+/// memory diagnostic still needs a useful source identity in optimized builds.
+/// `var_debug_info` is already available in stable MIR and does not force LLVM
+/// debug metadata emission, so keep this lightweight map separate from
+/// [`collect_debug_locals`].
+fn collect_local_source_names(body: &mir::Body) -> FxHashMap<mir::Local, String> {
+    let mut names = FxHashMap::default();
+    for info in &body.var_debug_info {
+        let local = match &info.value {
+            mir::VarDebugInfoContents::Place(place) if place.projection.is_empty() => place.local,
+            mir::VarDebugInfoContents::Place(_) | mir::VarDebugInfoContents::Const(_) => continue,
+        };
+        let name = info.name.to_string();
+        if !name.is_empty() {
+            names.entry(local).or_insert(name);
+        }
+    }
+    names
+}
+
+/// Compact source-level type spelling for local-memory diagnostics.
+fn local_memory_type_name(ty: &Ty) -> String {
+    match ty.kind() {
+        TyKind::RigidTy(RigidTy::Bool) => "bool".to_string(),
+        TyKind::RigidTy(RigidTy::Int(int_ty)) => int_name(int_ty).to_string(),
+        TyKind::RigidTy(RigidTy::Uint(uint_ty)) => uint_name(uint_ty).to_string(),
+        TyKind::RigidTy(RigidTy::Float(float_ty)) => float_name(float_ty).to_string(),
+        TyKind::RigidTy(RigidTy::RawPtr(pointee, mutability)) => {
+            raw_pointer_name(pointee, mutability)
+        }
+        TyKind::RigidTy(RigidTy::Ref(_, pointee, mutability)) => {
+            reference_name(pointee, mutability)
+        }
+        TyKind::RigidTy(RigidTy::Tuple(subtypes)) => format!(
+            "({})",
+            subtypes
+                .iter()
+                .map(local_memory_type_name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TyKind::RigidTy(RigidTy::Array(element, len)) => {
+            let count = array_len_const(&len)
+                .map(|count| count.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            format!("[{}; {count}]", local_memory_type_name(&element))
+        }
+        TyKind::RigidTy(RigidTy::Adt(adt_def, _)) => adt_def.trimmed_name(),
+        // Closure and coroutine environments reach here through
+        // `var_debug_info` merged from MIR-inlined callees (iterator adapters
+        // name their closure parameters, e.g. `f`). Their `{ty:?}` dump spells
+        // DefIds and generic args recursively and can run to many kilobytes,
+        // which would then be hex-encoded into an SSA value name; LLVM's
+        // textual parser mis-lexes identifiers that long. Spell them the way
+        // rustc diagnostics do instead.
+        TyKind::RigidTy(RigidTy::Closure(..)) => "{closure}".to_string(),
+        TyKind::RigidTy(
+            RigidTy::Coroutine(..) | RigidTy::CoroutineClosure(..) | RigidTy::CoroutineWitness(..),
+        ) => "{coroutine}".to_string(),
+        _ => bounded_type_spelling(ty),
+    }
+}
+
+/// Debug-format spelling for type kinds without a dedicated compact arm,
+/// hard-capped in length.
+///
+/// The spelling exists to be read in a one-line warning and travels inside an
+/// SSA value name, so an unbounded `{ty:?}` dump is never acceptable here even
+/// for kinds this function does not anticipate.
+fn bounded_type_spelling(ty: &Ty) -> String {
+    const MAX_TYPE_SPELLING_BYTES: usize = 64;
+    let mut spelled = format!("{ty:?}");
+    if spelled.len() > MAX_TYPE_SPELLING_BYTES {
+        let mut cut = MAX_TYPE_SPELLING_BYTES;
+        while !spelled.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        spelled.truncate(cut);
+        spelled.push_str("...");
+    }
+    spelled
+}
+
+/// Describe one MIR local as the provenance attribute carried by `mir.alloca`.
+///
+/// The attribute stays a first-class IR citizen through lowering; only the
+/// textual LLVM exporter serializes it (hex-encoded into the alloca's SSA
+/// name), so arbitrary Rust identifiers and type spellings cannot make
+/// invalid LLVM IR.
+fn local_memory_provenance(local_idx: usize, name: &str, ty: &Ty) -> LocalMemoryProvenanceAttr {
+    let size_bytes = ty
+        .layout()
+        .ok()
+        .map(|layout| layout.shape().size.bytes() as u64)
+        .unwrap_or(0);
+    LocalMemoryProvenanceAttr {
+        local_index: local_idx as u64,
+        size_bytes,
+        binding_name: name.into(),
+        type_name: local_memory_type_name(ty).into(),
+    }
 }
 
 /// Maximum nesting depth for composite debug types. Guards against deeply
@@ -623,8 +1052,69 @@ fn collect_debug_locals(
 /// the inner detail rather than recurse without bound.
 const MAX_DEBUG_TYPE_DEPTH: usize = 8;
 
-fn debug_type_for_ty(ty: &Ty) -> Option<DebugLocalTypeKind> {
+pub(crate) fn debug_type_for_ty(ty: &Ty) -> Option<DebugLocalTypeKind> {
     debug_type_for_ty_at(ty, 0)
+}
+
+/// Describe the compiler-materialized backing array for a shared-memory marker.
+///
+/// `SharedArray<T, N>` is a zero-sized Rust marker, but its device storage is
+/// the physical `[T; N]` allocation created by `mir.shared_alloc`. Building the
+/// debug type from `T` and `N` keeps that physical/logical object independent
+/// of the marker's own zero-sized layout.
+pub(crate) fn debug_shared_array_type(element_ty: &Ty, count: u64) -> Option<DebugLocalTypeKind> {
+    if count == 0 {
+        return None;
+    }
+    let element = debug_type_for_ty_at(element_ty, 1)?;
+    if !debug_type_graph_supported_for_shared(&element) {
+        return None;
+    }
+    let element_size_bits = layout_size_bits(element_ty)?;
+    if element.size_bits() != element_size_bits {
+        return None;
+    }
+    let size_bits = element_size_bits.checked_mul(count)?;
+    Some(DebugLocalTypeKind::Array {
+        name: format!("[{}; {count}]", short_ty_name(element_ty)),
+        size_bits,
+        element: Box::new(element),
+        count,
+    })
+}
+
+/// Opaque `Pointer` debug types carry no pointee type. Emitting them as an
+/// AS3 array element (including through a composite) would advertise an
+/// array-of-void-pointer shape, so those globals are omitted. `TypedPointer`
+/// carries a complete finite pointee tree and is admitted when that tree is
+/// itself supported.
+fn debug_type_graph_supported_for_shared(ty: &DebugLocalTypeKind) -> bool {
+    match ty {
+        DebugLocalTypeKind::Basic { .. } => true,
+        DebugLocalTypeKind::Pointer { .. } => false,
+        DebugLocalTypeKind::TypedPointer { pointee, .. } => {
+            debug_type_graph_supported_for_shared(pointee)
+        }
+        DebugLocalTypeKind::Array { element, .. } => debug_type_graph_supported_for_shared(element),
+        DebugLocalTypeKind::Struct { members, .. } => members
+            .iter()
+            .all(|member| debug_type_graph_supported_for_shared(&member.ty)),
+        DebugLocalTypeKind::Enum {
+            discriminant,
+            variants,
+            ..
+        } => {
+            discriminant
+                .as_ref()
+                .is_none_or(|discriminant| debug_type_graph_supported_for_shared(&discriminant.ty))
+                && variants.iter().all(|variant| {
+                    variant
+                        .members
+                        .iter()
+                        .all(|member| debug_type_graph_supported_for_shared(&member.ty))
+                })
+        }
+    }
 }
 
 fn debug_type_for_ty_at(ty: &Ty, depth: usize) -> Option<DebugLocalTypeKind> {
@@ -650,16 +1140,30 @@ fn debug_type_for_ty_at(ty: &Ty, depth: usize) -> Option<DebugLocalTypeKind> {
             encoding: "DW_ATE_float",
         }),
         TyKind::RigidTy(RigidTy::RawPtr(pointee, mutability)) => {
-            Some(DebugLocalTypeKind::Pointer {
-                name: raw_pointer_name(pointee, mutability),
-                size_bits: 64,
-            })
+            debug_typed_pointer_type(ty, &pointee, DebugPointerKind::Raw(mutability), depth)
+                .or_else(|| {
+                    Some(DebugLocalTypeKind::Pointer {
+                        name: raw_pointer_name(pointee, mutability),
+                        size_bits: 64,
+                    })
+                })
         }
         TyKind::RigidTy(RigidTy::Ref(_, pointee, mutability)) => {
-            Some(DebugLocalTypeKind::Pointer {
-                name: reference_name(pointee, mutability),
-                size_bits: 64,
-            })
+            debug_typed_pointer_type(ty, &pointee, DebugPointerKind::Reference(mutability), depth)
+                .or_else(|| {
+                    Some(DebugLocalTypeKind::Pointer {
+                        name: reference_name(pointee, mutability),
+                        size_bits: 64,
+                    })
+                })
+        }
+        TyKind::RigidTy(RigidTy::Closure(closure_def, substs)) if depth < MAX_DEBUG_TYPE_DEPTH => {
+            let upvar_tys = types::closure_upvar_tys(&substs)?;
+            let fields = upvar_tys
+                .into_iter()
+                .enumerate()
+                .map(|(idx, upvar_ty)| (format!("capture_{idx}"), upvar_ty));
+            debug_struct_type(ty, format!("{:?}", closure_def.def_id()), fields, depth)
         }
         TyKind::RigidTy(RigidTy::Tuple(subtypes)) if depth < MAX_DEBUG_TYPE_DEPTH => {
             let name = format!(
@@ -677,21 +1181,22 @@ fn debug_type_for_ty_at(ty: &Ty, depth: usize) -> Option<DebugLocalTypeKind> {
             debug_struct_type(ty, name, fields, depth)
         }
         TyKind::RigidTy(RigidTy::Adt(adt_def, substs)) if depth < MAX_DEBUG_TYPE_DEPTH => {
-            // Only plain structs (one variant) are described as composites here;
-            // enums and unions need DWARF variant parts (deferred).
-            if !matches!(adt_def.kind(), rustc_public::ty::AdtKind::Struct) {
-                return None;
+            match adt_def.kind() {
+                rustc_public::ty::AdtKind::Struct => {
+                    let variants = adt_def.variants();
+                    if variants.len() != 1 {
+                        return None;
+                    }
+                    let name = adt_def.trimmed_name();
+                    let fields = variants[0]
+                        .fields()
+                        .into_iter()
+                        .map(|field| (field.name.to_string(), field.ty_with_args(&substs)));
+                    debug_struct_type(ty, name, fields, depth)
+                }
+                rustc_public::ty::AdtKind::Enum => debug_enum_type(ty, depth),
+                rustc_public::ty::AdtKind::Union => None,
             }
-            let variants = adt_def.variants();
-            if variants.len() != 1 {
-                return None;
-            }
-            let name = adt_def.trimmed_name();
-            let fields = variants[0]
-                .fields()
-                .into_iter()
-                .map(|field| (field.name.to_string(), field.ty_with_args(&substs)));
-            debug_struct_type(ty, name, fields, depth)
         }
         TyKind::RigidTy(RigidTy::Array(elem_ty, len_const)) if depth < MAX_DEBUG_TYPE_DEPTH => {
             let count = array_len_const(&len_const)?;
@@ -701,6 +1206,125 @@ fn debug_type_for_ty_at(ty: &Ty, depth: usize) -> Option<DebugLocalTypeKind> {
                 name: format!("[{}; {count}]", short_ty_name(&elem_ty)),
                 size_bits,
                 element: Box::new(element),
+                count,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Describe a one-word pointer/reference and its safely bounded pointee.
+///
+/// Rust references and raw pointers to dynamically-sized types are fat
+/// pointers. Encoding those as a typed `DW_TAG_pointer_type` would discard
+/// their metadata word, so this helper declines them and lets the caller retain
+/// the legacy opaque pointer metadata. The same fallback applies when a pointee
+/// is unsupported or exceeds the recursion bound. Composite pointees are
+/// deliberately excluded here: `DebugLocalTypeKind` is currently a tree, so
+/// following an ADT such as `Node { next: *const Node }` would recursively
+/// unroll the same type instead of representing the cyclic DWARF graph.
+#[derive(Clone, Copy)]
+enum DebugPointerKind {
+    Raw(mir::Mutability),
+    Reference(mir::Mutability),
+}
+
+fn debug_typed_pointer_type(
+    pointer: &Ty,
+    pointee: &Ty,
+    kind: DebugPointerKind,
+    depth: usize,
+) -> Option<DebugLocalTypeKind> {
+    if depth >= MAX_DEBUG_TYPE_DEPTH {
+        return None;
+    }
+
+    let size_bits = layout_size_bits(pointer)?;
+    let pointer_word_bits =
+        rustc_public::target::MachineInfo::target_pointer_width().bytes() as u64 * 8;
+    if size_bits != pointer_word_bits {
+        return None;
+    }
+
+    // Build and validate the bounded pointee first. The source-facing pointer
+    // name is then derived from that accepted tree, so rejected pathological
+    // source types cannot recurse or grow a name before the depth gate fires.
+    let pointee = debug_pointer_pointee_type(pointee, depth + 1)?;
+    let name = debug_pointer_name(kind, &pointee);
+    Some(DebugLocalTypeKind::TypedPointer {
+        name,
+        size_bits,
+        pointee: Box::new(pointee),
+    })
+}
+
+fn debug_pointer_name(kind: DebugPointerKind, pointee: &DebugLocalTypeKind) -> String {
+    let pointee = typed_pointer_pointee_display_name(pointee);
+    match kind {
+        DebugPointerKind::Raw(mir::Mutability::Mut) => format!("*mut {pointee}"),
+        DebugPointerKind::Raw(mir::Mutability::Not) => format!("*const {pointee}"),
+        DebugPointerKind::Reference(mir::Mutability::Mut) => format!("&mut {pointee}"),
+        DebugPointerKind::Reference(mir::Mutability::Not) => format!("&{pointee}"),
+    }
+}
+
+fn typed_pointer_pointee_display_name(ty: &DebugLocalTypeKind) -> &str {
+    match ty {
+        DebugLocalTypeKind::Basic { name, .. }
+        | DebugLocalTypeKind::TypedPointer { name, .. }
+        | DebugLocalTypeKind::Array { name, .. } => name,
+        DebugLocalTypeKind::Pointer { .. }
+        | DebugLocalTypeKind::Struct { .. }
+        | DebugLocalTypeKind::Enum { .. } => {
+            unreachable!("typed pointer pointees use only the bounded typed subset")
+        }
+    }
+}
+
+/// Build the finite subset that is safe to embed beneath a pointer node.
+///
+/// Primitive leaves, fixed arrays whose elements stay inside this subset, and
+/// nested thin pointers/references form an acyclic tree. Tuples, ADTs, enums,
+/// closures, and every other composite are rejected even when the general
+/// local-variable debug path can describe part of them. `char` and unit are
+/// also rejected until `DebugLocalTypeKind` has an accurate encoding for them;
+/// treating either as an integer or null-base pointer would be misleading.
+fn debug_pointer_pointee_type(ty: &Ty, depth: usize) -> Option<DebugLocalTypeKind> {
+    match ty.kind() {
+        TyKind::RigidTy(RigidTy::Bool) => Some(DebugLocalTypeKind::Basic {
+            name: "bool".to_string(),
+            size_bits: 8,
+            encoding: "DW_ATE_boolean",
+        }),
+        TyKind::RigidTy(RigidTy::Int(int_ty)) => Some(DebugLocalTypeKind::Basic {
+            name: int_name(int_ty).to_string(),
+            size_bits: (int_ty.num_bytes() * 8) as u64,
+            encoding: "DW_ATE_signed",
+        }),
+        TyKind::RigidTy(RigidTy::Uint(uint_ty)) => Some(DebugLocalTypeKind::Basic {
+            name: uint_name(uint_ty).to_string(),
+            size_bits: (uint_ty.num_bytes() * 8) as u64,
+            encoding: "DW_ATE_unsigned",
+        }),
+        TyKind::RigidTy(RigidTy::Float(float_ty)) => Some(DebugLocalTypeKind::Basic {
+            name: float_name(float_ty).to_string(),
+            size_bits: float_size_bits(float_ty),
+            encoding: "DW_ATE_float",
+        }),
+        TyKind::RigidTy(RigidTy::RawPtr(pointee, mutability)) => {
+            debug_typed_pointer_type(ty, &pointee, DebugPointerKind::Raw(mutability), depth)
+        }
+        TyKind::RigidTy(RigidTy::Ref(_, pointee, mutability)) => {
+            debug_typed_pointer_type(ty, &pointee, DebugPointerKind::Reference(mutability), depth)
+        }
+        TyKind::RigidTy(RigidTy::Array(element, len)) if depth < MAX_DEBUG_TYPE_DEPTH => {
+            let count = array_len_const(&len)?;
+            let element_debug = debug_pointer_pointee_type(&element, depth + 1)?;
+            let element_name = typed_pointer_pointee_display_name(&element_debug);
+            Some(DebugLocalTypeKind::Array {
+                name: format!("[{element_name}; {count}]"),
+                size_bits: layout_size_bits(ty)?,
+                element: Box::new(element_debug),
                 count,
             })
         }
@@ -755,6 +1379,238 @@ fn debug_struct_type(
         size_bits,
         members,
     })
+}
+
+/// Build a Rust enum debug type using rustc's physical layout.
+///
+/// This mirrors rustc's native DWARF representation rather than guessing from
+/// source-level `Option`/`Result` shapes: a top-level structure contains a
+/// variant part, whose discriminator is either the direct integer tag or the
+/// integer-normalized niche carrier. Variant payload fields use rustc's exact
+/// per-variant offsets. For niche layouts the untagged variant deliberately has
+/// no discriminant value, so the debugger treats it as the default branch.
+fn debug_enum_type(ty: &Ty, depth: usize) -> Option<DebugLocalTypeKind> {
+    let TyKind::RigidTy(RigidTy::Adt(adt_def, substs)) = ty.kind() else {
+        return None;
+    };
+    if !matches!(adt_def.kind(), rustc_public::ty::AdtKind::Enum) {
+        return None;
+    }
+
+    #[derive(Clone, Copy)]
+    enum DebugEnumLayout {
+        Direct {
+            width: u64,
+        },
+        Niche {
+            width: u64,
+            niche_variant_start: usize,
+            niche_start: u128,
+            untagged_variant: usize,
+        },
+        Single,
+        Empty,
+    }
+
+    let layout_shape = ty.layout().ok()?.shape();
+    let size_bits = layout_shape.size.bytes() as u64 * 8;
+
+    let (discriminant, debug_layout) = match &layout_shape.variants {
+        rustc_public::abi::VariantsShape::Multiple {
+            tag,
+            tag_encoding: rustc_public::abi::TagEncoding::Direct,
+            tag_field,
+            ..
+        } => {
+            let primitive = match tag {
+                rustc_public::abi::Scalar::Initialized { value, .. }
+                | rustc_public::abi::Scalar::Union { value } => *value,
+            };
+            let rustc_public::abi::Primitive::Int { length, signed } = primitive else {
+                return None;
+            };
+            let width = length.bits() as u64;
+            if width == 0 || width > 64 {
+                return None;
+            }
+            let offset_bits = crate::translator::layout::enum_tag_offset(
+                &layout_shape.fields,
+                *tag_field,
+                pliron::location::Location::Unknown,
+            )
+            .ok()? as u64
+                * 8;
+            let tag_ty = DebugLocalTypeKind::Basic {
+                name: format!("{}{}", if signed { "i" } else { "u" }, width),
+                size_bits: width,
+                encoding: if signed {
+                    "DW_ATE_signed"
+                } else {
+                    "DW_ATE_unsigned"
+                },
+            };
+            (
+                Some(DebugEnumDiscriminant {
+                    offset_bits,
+                    ty: Box::new(tag_ty),
+                }),
+                DebugEnumLayout::Direct { width },
+            )
+        }
+        rustc_public::abi::VariantsShape::Multiple {
+            tag,
+            tag_encoding:
+                rustc_public::abi::TagEncoding::Niche {
+                    untagged_variant,
+                    niche_variants,
+                    niche_start,
+                },
+            tag_field,
+            ..
+        } => {
+            let primitive = match tag {
+                rustc_public::abi::Scalar::Initialized { value, .. }
+                | rustc_public::abi::Scalar::Union { value } => *value,
+            };
+            let width = primitive
+                .size(&rustc_public::target::MachineInfo::target())
+                .bits() as u64;
+            if width == 0 || width > 64 {
+                return None;
+            }
+            let offset_bits = crate::translator::layout::enum_tag_offset(
+                &layout_shape.fields,
+                *tag_field,
+                pliron::location::Location::Unknown,
+            )
+            .ok()? as u64
+                * 8;
+
+            // rustc normalizes niche carriers, including pointer niches, to an
+            // unsigned integer of the same physical width for DWARF.
+            let tag_name = match primitive {
+                rustc_public::abi::Primitive::Pointer(_) if width == 64 => "usize".to_string(),
+                _ => format!("u{width}"),
+            };
+            let tag_ty = DebugLocalTypeKind::Basic {
+                name: tag_name,
+                size_bits: width,
+                encoding: "DW_ATE_unsigned",
+            };
+            (
+                Some(DebugEnumDiscriminant {
+                    offset_bits,
+                    ty: Box::new(tag_ty),
+                }),
+                DebugEnumLayout::Niche {
+                    width,
+                    niche_variant_start: niche_variants.start().to_index(),
+                    niche_start: *niche_start,
+                    untagged_variant: untagged_variant.to_index(),
+                },
+            )
+        }
+        rustc_public::abi::VariantsShape::Single { .. } => (None, DebugEnumLayout::Single),
+        rustc_public::abi::VariantsShape::Empty => (None, DebugEnumLayout::Empty),
+    };
+
+    let source_variants = adt_def.variants();
+    let mut variants = Vec::with_capacity(source_variants.len());
+
+    for (variant_index, variant) in source_variants.iter().enumerate() {
+        let fields = variant.fields();
+        let field_offsets: Vec<u64> = match &layout_shape.variants {
+            rustc_public::abi::VariantsShape::Single { index }
+                if index.to_index() != variant_index =>
+            {
+                vec![0; fields.len()]
+            }
+            rustc_public::abi::VariantsShape::Empty => vec![0; fields.len()],
+            _ => crate::translator::layout::enum_variant_field_offsets(
+                &layout_shape,
+                variant_index,
+                pliron::location::Location::Unknown,
+            )
+            .ok()?
+            .into_iter()
+            .map(|offset| offset as u64)
+            .collect(),
+        };
+
+        let mut members = Vec::new();
+        for (field_index, field) in fields.into_iter().enumerate() {
+            let field_ty = field.ty_with_args(&substs);
+            let Some(member_ty) = debug_type_for_ty_at(&field_ty, depth + 1) else {
+                continue;
+            };
+            if member_ty.size_bits() == 0 {
+                continue;
+            }
+            let offset_bytes = *field_offsets.get(field_index)?;
+            let source_name = field.name.to_string();
+            let member_name = if source_name.parse::<usize>().ok() == Some(field_index) {
+                format!("__{field_index}")
+            } else {
+                source_name
+            };
+            members.push(DebugTypeMember {
+                name: member_name,
+                offset_bits: offset_bytes * 8,
+                ty: member_ty,
+            });
+        }
+
+        let discriminant_value = match debug_layout {
+            DebugEnumLayout::Direct { width } => {
+                let variant_idx = rustc_public::ty::VariantIdx::to_val(variant_index);
+                let raw = adt_def.discriminant_for_variant(variant_idx).val;
+                truncate_debug_discriminant(raw, width)
+            }
+            DebugEnumLayout::Niche {
+                width,
+                niche_variant_start,
+                niche_start,
+                untagged_variant,
+            } => {
+                if variant_index == untagged_variant {
+                    None
+                } else {
+                    let raw = (variant_index as u128)
+                        .wrapping_sub(niche_variant_start as u128)
+                        .wrapping_add(niche_start);
+                    truncate_debug_discriminant(raw, width)
+                }
+            }
+            DebugEnumLayout::Single | DebugEnumLayout::Empty => None,
+        };
+
+        variants.push(DebugEnumVariant {
+            name: variant.name().to_string(),
+            discriminant: discriminant_value,
+            members,
+        });
+    }
+
+    Some(DebugLocalTypeKind::Enum {
+        name: adt_def.trimmed_name(),
+        size_bits,
+        discriminant,
+        variants,
+    })
+}
+
+/// Truncate a physical discriminant to the width LLVM will attach as
+/// `extraData` on the corresponding variant member.
+fn truncate_debug_discriminant(value: u128, width: u64) -> Option<u64> {
+    if width == 0 || width > 64 {
+        return None;
+    }
+    let mask = if width == 64 {
+        u128::from(u64::MAX)
+    } else {
+        (1u128 << width) - 1
+    };
+    Some((value & mask) as u64)
 }
 
 /// Total size of `ty` in bits from its layout, or `None` if unavailable.
@@ -899,8 +1755,9 @@ fn emit_entry_allocas(
     let debug_locals = if debug_kind.variables_enabled() {
         collect_debug_locals(ctx, body)
     } else {
-        FxHashMap::default()
+        CollectedDebugLocals::default()
     };
+    let local_source_names = collect_local_source_names(body);
 
     // Translate local types once up front. The address-space analyzer uses
     // each pointer local's declared lowering as the conservative fallback for
@@ -944,7 +1801,23 @@ fn emit_entry_allocas(
         let mir_ty = values::align_pointer_addr_space(ctx, mir_ty, target);
 
         let (op, slot) = ValueMap::emit_alloca(ctx, mir_ty, entry_block, prev_op);
-        if let Some(info) = debug_locals.get(&local) {
+
+        // Tag only named Rust source locals. Compiler temporaries and lowering-
+        // synthesized LLVM allocas must not turn verbose builds into a stream of
+        // warnings that cannot be attributed back to user code.
+        if let Some(source_name) = local_source_names.get(&local)
+            && let Some(decl) = body.local_decl(local)
+        {
+            llvm_export::ops::set_local_memory_provenance(
+                ctx,
+                op,
+                local_memory_provenance(local_idx, source_name, &decl.ty),
+            );
+        }
+
+        if let Some(infos) = debug_locals.whole.get(&local)
+            && let Some(info) = infos.first()
+        {
             llvm_export::ops::set_debug_local_variable(ctx, op, info.variable.clone());
             if debug_source_scopes
                 .is_some_and(|map| map.scopes.iter().any(|scope| scope.id == info.source_scope))
@@ -952,6 +1825,23 @@ fn emit_entry_allocas(
                 llvm_export::ops::set_debug_local_source_scope(ctx, op, info.source_scope);
             }
             op.deref_mut(ctx).set_loc(info.loc.clone());
+            let aliases: Vec<_> = infos[1..]
+                .iter()
+                .map(|alias| DebugWholeVariableInfo {
+                    variable: alias.variable.clone(),
+                    source_scope: Some(alias.source_scope),
+                    declaration: alias.declaration.clone(),
+                })
+                .collect();
+            if !aliases.is_empty() {
+                llvm_export::ops::set_debug_whole_variable_aliases(ctx, op, &aliases);
+            }
+        }
+        if let Some(projected) = debug_locals.projected.get(&local) {
+            llvm_export::ops::set_debug_projected_variables(ctx, op, projected);
+        }
+        if let Some(fragments) = debug_locals.fragments.get(&local) {
+            llvm_export::ops::set_debug_fragment_variables(ctx, op, fragments);
         }
         prev_op = Some(op);
         value_map.set_slot(local, slot);
@@ -1006,7 +1896,32 @@ pub fn translate_body(
     legaliser: &mut Legaliser,
     debug_kind: DebugKind,
     debug_source_scopes: Option<&DebugSourceScopeMap>,
+    statement_debug_info: Option<&StatementDebugInfoMap>,
 ) -> TranslationResult<Ptr<Operation>> {
+    if let Some(statement_debug_info) = statement_debug_info {
+        if statement_debug_info.blocks.len() != body.blocks.len() {
+            return input_err_noloc!(TranslationErr::invalid_op(format!(
+                "statement debug sidecar has {} blocks, but stable MIR has {}",
+                statement_debug_info.blocks.len(),
+                body.blocks.len()
+            )));
+        }
+        for (block_index, (debug_block, mir_block)) in statement_debug_info
+            .blocks
+            .iter()
+            .zip(&body.blocks)
+            .enumerate()
+        {
+            if debug_block.before_statements.len() != mir_block.statements.len() {
+                return input_err_noloc!(TranslationErr::invalid_op(format!(
+                    "statement debug sidecar block {block_index} has {} statement boundaries, but stable MIR has {} statements",
+                    debug_block.before_statements.len(),
+                    mir_block.statements.len()
+                )));
+            }
+        }
+    }
+
     // Establish and validate rustc's exact per-instance reachability before
     // any whole-body semantic scan. Dead blocks must not influence function
     // attributes, pointer-slot address spaces, or later code emission.
@@ -1020,6 +1935,7 @@ pub fn translate_body(
     // Create a value map to track MIR locals -> pliron IR values
     let num_locals = body.locals().len();
     let mut value_map = ValueMap::new(num_locals);
+    value_map.set_debug_variables(debug_kind.variables_enabled());
 
     // Resolve the per-body unchecked-indexing policy. Like the dynamic-shared
     // marker, the `#[kernel(unchecked_indexing)]` marker is scanned on any
@@ -1094,6 +2010,52 @@ pub fn translate_body(
         }
     };
 
+    // Validate the source contract before translating argument types, so DSTs
+    // and interior-mutability failures report the grid-constant declaration
+    // rather than an incidental failure deeper in type lowering.
+    let grid_constant_params =
+        detect_grid_constant_params(body, &reachable, instance, is_kernel)
+            .map_err(|error| input_error_noloc!(TranslationErr::invalid_op(error)))?;
+    let mut grid_constant_layouts = Vec::with_capacity(grid_constant_params.len());
+    for source_index in grid_constant_params {
+        if source_index >= num_args {
+            return input_err_noloc!(TranslationErr::invalid_op(format!(
+                "grid-constant source parameter index {source_index} is out of range for {num_args} parameters"
+            )));
+        }
+        let local = mir::Local::from(source_index + 1);
+        let parameter_ty = body.locals()[local].ty;
+        let TyKind::RigidTy(RigidTy::Ref(_, pointee, mutability)) = parameter_ty.kind() else {
+            return input_err_noloc!(TranslationErr::invalid_op(format!(
+                "grid-constant source parameter {source_index} is not a reference"
+            )));
+        };
+        if mutability != mir::Mutability::Not {
+            return input_err_noloc!(TranslationErr::invalid_op(format!(
+                "grid-constant source parameter {source_index} is mutable"
+            )));
+        }
+        facts::validate_grid_constant_parameter(instance, source_index, pointee)
+            .map_err(|error| input_error_noloc!(TranslationErr::invalid_op(error)))?;
+        let layout = pointee.layout().map_err(|error| {
+            input_error_noloc!(TranslationErr::unsupported(format!(
+                "could not query grid-constant parameter {source_index} pointee layout: {error:?}"
+            )))
+        })?;
+        let shape = layout.shape();
+        if !shape.is_sized() {
+            return input_err_noloc!(TranslationErr::invalid_op(format!(
+                "grid-constant source parameter {source_index} requires a sized pointee"
+            )));
+        }
+        if shape.size.bytes() == 0 {
+            return input_err_noloc!(TranslationErr::invalid_op(format!(
+                "grid-constant source parameter {source_index} has a zero-sized pointee"
+            )));
+        }
+        grid_constant_layouts.push((source_index, pointee, shape.abi_align));
+    }
+
     for arg_idx in 0..num_args {
         // MIR local index for arguments: local 1, 2, 3, ... (0 is return value)
         let local = mir::Local::from(arg_idx + 1);
@@ -1161,7 +2123,38 @@ pub fn translate_body(
     };
     mir_func_op.set_symbol_name(ctx, legaliser.legalise(&name_str));
 
-    // Check if the function has the #[cuda_oxide::kernel] attribute (passed via is_kernel flag)
+    // Keep the Rust/source-facing name independent of the physical symbol.
+    // Kernels deliberately retain their user-visible export name: their MIR
+    // instance is the macro-generated device implementation, whose diagnostic
+    // name is not the name callers launch or set breakpoints on.  Device
+    // helpers use stable MIR's fully specialized diagnostic name, while their
+    // physical symbol may be legalized (non-generic) or mangled (generic).
+    let debug_name = function_debug_name(instance, is_kernel, &name_str);
+    llvm_export::ops::set_debug_function_name(ctx, op_ptr, &debug_name);
+
+    // Stamp only the currently audited Rust-ABI kernel reference facts.
+    // `facts.rs` is the semantic oracle: this layer merely associates each
+    // typed rustc_public proof with its source argument index. Foreign-ABI
+    // kernels intentionally remain bare even when a parameter happens to have
+    // a reference-shaped Rust type.
+    let has_rust_abi = fn_ty.kind().fn_sig().is_some_and(|signature| {
+        matches!(signature.skip_binder().abi, rustc_public::ty::Abi::Rust)
+    });
+    if is_kernel && has_rust_abi {
+        for arg_idx in 0..num_args {
+            let local = mir::Local::from(arg_idx + 1);
+            let source_ty = &body.locals()[local].ty;
+            let Some(validity) = facts::reference_param_validity(source_ty) else {
+                continue;
+            };
+            mir_func_op.set_reference_param_validity(
+                ctx,
+                arg_idx,
+                ReferenceParamValidityAttr(validity.pointee_alignment),
+            );
+        }
+    }
+
     if is_kernel {
         // Add "gpu_kernel" attribute to the mir.func operation.
         // This will be used by the lowering pass to set the "gpu_kernel" attribute on the llvm.func.
@@ -1173,6 +2166,37 @@ pub fn translate_body(
             .deref_mut(ctx)
             .attributes
             .set(key, kernel_attr);
+
+        for (source_index, pointee, alignment) in grid_constant_layouts {
+            let pointee_ty = types::translate_type(ctx, &pointee)?;
+            let type_key: Identifier =
+                format!("{MIR_GRID_CONSTANT_POINTEE_ATTR_PREFIX}{source_index}")
+                    .as_str()
+                    .try_into()
+                    .expect("grid-constant pointee attribute name is valid");
+            let align_key: Identifier =
+                format!("{MIR_GRID_CONSTANT_ALIGN_ATTR_PREFIX}{source_index}")
+                    .as_str()
+                    .try_into()
+                    .expect("grid-constant alignment attribute name is valid");
+            let align_ty = pliron::builtin::types::IntegerType::get(
+                ctx,
+                64,
+                pliron::builtin::types::Signedness::Unsigned,
+            );
+            let align = pliron::utils::apint::APInt::from_u64(
+                alignment,
+                std::num::NonZero::new(64).expect("64 is non-zero"),
+            );
+            let mut operation = mir_func_op.get_operation().deref_mut(ctx);
+            operation
+                .attributes
+                .set(type_key, TypeAttr::new(pointee_ty));
+            operation.attributes.set(
+                align_key,
+                pliron::builtin::attributes::IntegerAttr::new(align_ty, align),
+            );
+        }
 
         // Detect compile-time cluster configuration from #[cluster(x,y,z)] attribute
         if let Some(cluster_dims) = detect_cluster_config(body, &reachable) {
@@ -1392,6 +2416,19 @@ pub fn translate_body(
         &reachable,
     );
 
+    if debug_kind.variables_enabled()
+        && let Some(statement_debug_info) = statement_debug_info
+    {
+        super::statement_debug::prepare_statement_debug_spills(
+            ctx,
+            body,
+            statement_debug_info,
+            &reachable,
+            rustc_mono_successors,
+            &mut value_map,
+        );
+    }
+
     // -------------------------------------------------------------------------
     // PHASE 2: Translate reachable blocks
     // -------------------------------------------------------------------------
@@ -1406,6 +2443,10 @@ pub fn translate_body(
         let mir_block = &body.blocks[idx];
         let block_ptr = block_map[idx];
         let entry_prev_op = if idx == 0 { entry_last_op } else { None };
+        let block_debug_info = debug_kind
+            .variables_enabled()
+            .then(|| statement_debug_info.map(|map| &map.blocks[idx]))
+            .flatten();
         block::translate_block(
             ctx,
             body,
@@ -1417,6 +2458,7 @@ pub fn translate_body(
             &rustc_mono_successors[idx],
             legaliser,
             entry_prev_op,
+            block_debug_info,
         )?;
         blocks_processed.insert(idx);
     }
@@ -1440,6 +2482,20 @@ pub fn translate_body(
     }
 
     Ok(op_ptr)
+}
+
+/// Choose the debugger-visible spelling independently of a function's symbol.
+///
+/// Device-helper names intentionally keep concrete generic arguments. Erasing
+/// them would make distinct monomorphizations indistinguishable. Supporting a
+/// shorthand such as `Type::method` for every specialization requires proper
+/// namespace/type DIEs (or a separately agreed alias policy), not lossy names.
+fn function_debug_name(instance: &mono::Instance, is_kernel: bool, export_name: &str) -> String {
+    if is_kernel {
+        export_name.to_string()
+    } else {
+        instance.name().to_string()
+    }
 }
 
 /// Propagate `#[inline(always)]` as an LLVM `alwaysinline` function
@@ -1518,6 +2574,163 @@ mod tests {
     }
 
     #[test]
+    fn stable_mir_function_names_are_source_facing_and_specialized() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cuda_oxide_function_debug_name_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture = root.join("function_debug_name_fixture.rs");
+        std::fs::write(
+            &fixture,
+            r#"
+#[inline(never)]
+pub fn plain(value: u32) -> u32 { value + 1 }
+
+#[inline(never)]
+pub fn generic<T>(value: T) -> T { value }
+
+pub struct Wrapper<T>(pub T);
+
+impl<T> Wrapper<T> {
+    #[inline(never)]
+    pub fn get_mut(&mut self) -> &mut T { &mut self.0 }
+}
+
+#[inline(never)]
+pub fn cuda_oxide_device_generated_kernel(mut wrapped: Wrapper<u16>) -> u32 {
+    let _ = generic::<u64>(3);
+    let _ = wrapped.get_mut();
+    plain(7)
+}
+"#,
+        )
+        .unwrap();
+
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let sysroot_output = std::process::Command::new(rustc)
+            .args(["--print", "sysroot"])
+            .output()
+            .expect("query rustc sysroot");
+        assert!(sysroot_output.status.success(), "rustc --print sysroot");
+        let sysroot = String::from_utf8(sysroot_output.stdout)
+            .expect("sysroot path is UTF-8")
+            .trim()
+            .to_string();
+
+        let args = vec![
+            "rustc".to_string(),
+            "--edition=2024".to_string(),
+            "--crate-type=rlib".to_string(),
+            "--crate-name=function_debug_name_fixture".to_string(),
+            "--emit=metadata".to_string(),
+            "-Zmir-opt-level=0".to_string(),
+            format!("--out-dir={}", root.display()),
+            format!("--sysroot={sysroot}"),
+            fixture.display().to_string(),
+        ];
+
+        let names = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                rustc_public::run!(&args, || {
+                    let item = rustc_public::all_local_items()
+                        .into_iter()
+                        .find(|item| {
+                            item.name()
+                                .ends_with("::cuda_oxide_device_generated_kernel")
+                        })
+                        .expect("fixture entry item");
+                    let instance = mono::Instance::try_from(item).expect("entry instance");
+                    let body = instance.body().expect("entry body");
+                    let mut callees = Vec::new();
+
+                    for block in &body.blocks {
+                        let mir::TerminatorKind::Call { func, .. } = &block.terminator.kind else {
+                            continue;
+                        };
+                        let mir::Operand::Constant(constant) = func else {
+                            continue;
+                        };
+                        let ConstantKind::ZeroSized = constant.const_.kind() else {
+                            continue;
+                        };
+                        let TyKind::RigidTy(RigidTy::FnDef(definition, args)) =
+                            constant.const_.ty().kind()
+                        else {
+                            continue;
+                        };
+                        let Some(callee) = mono::Instance::resolve(definition, &args).ok() else {
+                            continue;
+                        };
+                        callees.push((
+                            callee.name().to_string(),
+                            callee.def.name().to_string(),
+                            callee.mangled_name().to_string(),
+                        ));
+                    }
+
+                    std::ops::ControlFlow::<(), _>::Continue((
+                        instance.name().to_string(),
+                        function_debug_name(&instance, true, "visible_kernel"),
+                        callees,
+                    ))
+                })
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+            .expect("in-process fixture compilation succeeds");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(
+            names.0,
+            "function_debug_name_fixture::cuda_oxide_device_generated_kernel"
+        );
+        assert_eq!(names.1, "visible_kernel");
+        let source_names: std::collections::BTreeSet<_> = names
+            .2
+            .iter()
+            .map(|(source, _, _)| source.as_str())
+            .collect();
+        assert_eq!(
+            source_names,
+            std::collections::BTreeSet::from([
+                "function_debug_name_fixture::Wrapper::<u16>::get_mut",
+                "function_debug_name_fixture::generic::<u64>",
+                "function_debug_name_fixture::plain",
+            ])
+        );
+        let definition_names: std::collections::BTreeSet<_> = names
+            .2
+            .iter()
+            .map(|(_, definition, _)| definition.as_str())
+            .collect();
+        assert_eq!(
+            definition_names,
+            std::collections::BTreeSet::from([
+                "function_debug_name_fixture::Wrapper::<T>::get_mut",
+                "function_debug_name_fixture::generic",
+                "function_debug_name_fixture::plain",
+            ]),
+            "definition names are not specialized enough for debugger overloads"
+        );
+        for (source_name, _, mangled_name) in names.2 {
+            assert_ne!(source_name, mangled_name);
+            assert!(
+                mangled_name.starts_with("_R"),
+                "expected a Rust linkage symbol, got {mangled_name}"
+            );
+        }
+    }
+
+    #[test]
     fn inline_always_flag_reaches_llvm_func_attr_before_export() {
         let mut ctx = Context::new();
         crate::translator::register_dialects(&mut ctx);
@@ -1556,6 +2769,11 @@ mod tests {
         };
 
         set_alwaysinline_attr_from_flag(&mut ctx, &mir_func, false, true);
+        llvm_export::ops::set_debug_function_name(
+            &mut ctx,
+            mir_func.get_operation(),
+            "source_crate::inline_helper",
+        );
         mir_func.get_operation().insert_at_back(module_block, &ctx);
 
         mir_lower::register(&mut ctx);
@@ -1580,5 +2798,624 @@ mod tests {
                 .contains_key(&key),
             "`is_inline_always` must become an LLVM dialect alwaysinline attribute before export",
         );
+        assert_eq!(
+            llvm_export::ops::debug_function_name(&ctx, llvm_func.get_operation()).as_deref(),
+            Some("source_crate::inline_helper"),
+            "MIR-to-LLVM lowering must preserve the source-facing function name",
+        );
+    }
+
+    /// Exercise `debug_fragment` against composite `VarDebugInfo` produced by
+    /// rustc's scalar-replacement pass instead of constructing synthetic types.
+    ///
+    /// The fixture deliberately creates an aggregate local and enables MIR
+    /// optimization so SROA rewrites its debug binding into field fragments.
+    /// The test then checks that every supported fragment matches rustc's real
+    /// layout and that a non-field projection fails closed.
+    #[test]
+    fn scalar_replacement_debug_fragments_follow_rustc_layout_and_fail_closed() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cuda_oxide_fragment_debug_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture = root.join("fragment_debug_fixture.rs");
+        std::fs::write(
+            &fixture,
+            r#"
+pub fn scalarized_pair(a: u32, b: u64) -> u64 {
+    let pair = (a, b);
+    pair.1.wrapping_add(pair.0 as u64)
+}
+"#,
+        )
+        .unwrap();
+
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let sysroot_output = std::process::Command::new(rustc)
+            .args(["--print", "sysroot"])
+            .output()
+            .expect("query rustc sysroot");
+        assert!(sysroot_output.status.success(), "rustc --print sysroot");
+        let sysroot = String::from_utf8(sysroot_output.stdout)
+            .expect("sysroot path is UTF-8")
+            .trim()
+            .to_string();
+
+        let args = vec![
+            "rustc".to_string(),
+            "--edition=2024".to_string(),
+            "--crate-type=rlib".to_string(),
+            "--crate-name=fragment_debug_fixture".to_string(),
+            "--emit=metadata".to_string(),
+            "-Cdebuginfo=2".to_string(),
+            "-Zmir-opt-level=3".to_string(),
+            format!("--out-dir={}", root.display()),
+            format!("--sysroot={sysroot}"),
+            fixture.display().to_string(),
+        ];
+
+        let result = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                rustc_public::run!(&args, || {
+                    let mut checked = 0usize;
+                    let mut rejected_non_field = false;
+
+                    for body in rustc_public::all_local_items()
+                        .into_iter()
+                        .filter_map(|item| item.body())
+                    {
+                        for info in &body.var_debug_info {
+                            if info.name != "pair" {
+                                continue;
+                            }
+                            let Some(composite) = &info.composite else {
+                                continue;
+                            };
+                            let [mir::ProjectionElem::Field(field_idx, field_ty)] =
+                                composite.projection.as_slice()
+                            else {
+                                continue;
+                            };
+
+                            let fragment = debug_fragment(composite)
+                                .expect("SROA field fragment should be supported");
+                            let whole_layout = composite.ty.layout().expect("whole layout").shape();
+                            let rustc_public::abi::FieldsShape::Arbitrary { offsets } =
+                                &whole_layout.fields
+                            else {
+                                panic!("tuple fragment must use arbitrary field offsets");
+                            };
+                            let expected_offset_bits = offsets[*field_idx].bytes() as u64 * 8;
+                            let expected_size_bits = field_ty
+                                .layout()
+                                .expect("field layout")
+                                .shape()
+                                .size
+                                .bytes()
+                                as u64
+                                * 8;
+
+                            assert_eq!(fragment.offset_bits, expected_offset_bits);
+                            assert_eq!(fragment.size_bits, expected_size_bits);
+                            checked += 1;
+
+                            let mut invalid = composite.clone();
+                            invalid.projection[0] = mir::ProjectionElem::Deref;
+                            rejected_non_field |= debug_fragment(&invalid).is_none();
+                        }
+                    }
+
+                    std::ops::ControlFlow::<(), _>::Continue((checked, rejected_non_field))
+                })
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+            .expect("in-process fixture compilation succeeds");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(
+            result.0 >= 2,
+            "fixture should produce at least two SROA debug fragments, got {}",
+            result.0
+        );
+        assert!(
+            result.1,
+            "debug_fragment must reject non-field composite projections"
+        );
+    }
+
+    /// Reference propagation may map several source bindings to one optimized
+    /// MIR local. Keep every whole-variable identity instead of silently
+    /// retaining only the first one in the map.
+    #[test]
+    fn reference_propagation_retains_every_whole_variable_identity() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cuda_oxide_whole_debug_alias_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture = root.join("whole_debug_alias_fixture.rs");
+        std::fs::write(
+            &fixture,
+            r#"
+#[inline(never)]
+pub fn probe(x: &i32) -> i32 {
+    let first: *const i32 = x as *const i32;
+    let second: *const i32 = x as *const i32;
+    unsafe { *first + *second }
+}
+"#,
+        )
+        .unwrap();
+
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let sysroot_output = std::process::Command::new(rustc)
+            .args(["--print", "sysroot"])
+            .output()
+            .expect("query rustc sysroot");
+        assert!(sysroot_output.status.success(), "rustc --print sysroot");
+        let sysroot = String::from_utf8(sysroot_output.stdout)
+            .expect("sysroot path is UTF-8")
+            .trim()
+            .to_string();
+
+        let args = vec![
+            "rustc".to_string(),
+            "--edition=2024".to_string(),
+            "--crate-type=rlib".to_string(),
+            "--crate-name=whole_debug_alias_fixture".to_string(),
+            "--emit=metadata".to_string(),
+            "-Cdebuginfo=2".to_string(),
+            "-Copt-level=3".to_string(),
+            "-Zmir-enable-passes=-ScalarReplacementOfAggregates,-SingleUseConsts".to_string(),
+            format!("--out-dir={}", root.display()),
+            format!("--sysroot={sysroot}"),
+            fixture.display().to_string(),
+        ];
+
+        let identities = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                rustc_public::run!(&args, || {
+                    let body = rustc_public::all_local_items()
+                        .into_iter()
+                        .find(|item| item.name().ends_with("::probe"))
+                        .and_then(|item| item.body())
+                        .expect("probe body");
+                    let source_locals: Vec<_> = body
+                        .var_debug_info
+                        .iter()
+                        .filter(|info| matches!(info.name.as_str(), "x" | "first" | "second"))
+                        .map(|info| match &info.value {
+                            mir::VarDebugInfoContents::Place(place)
+                                if place.projection.is_empty() =>
+                            {
+                                place.local
+                            }
+                            other => panic!("whole binding expected, got {other:?}"),
+                        })
+                        .collect();
+                    assert_eq!(
+                        source_locals.len(),
+                        3,
+                        "fixture has three source identities"
+                    );
+                    assert!(
+                        source_locals.iter().all(|local| *local == source_locals[0]),
+                        "ReferencePropagation should coalesce x/first/second onto one MIR local"
+                    );
+
+                    let mut ctx = Context::new();
+                    crate::translator::register_dialects(&mut ctx);
+                    let collected = collect_debug_locals(&mut ctx, &body);
+                    let infos = collected
+                        .whole
+                        .get(&source_locals[0])
+                        .expect("coalesced local retains whole debug identities");
+                    std::ops::ControlFlow::<(), _>::Continue(
+                        infos
+                            .iter()
+                            .map(|info| {
+                                (
+                                    info.variable.name.clone(),
+                                    info.variable.argument_index,
+                                    info.variable.ty.clone(),
+                                    info.source_scope,
+                                    info.declaration.clone(),
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+            .expect("in-process fixture compilation succeeds");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(
+            identities
+                .iter()
+                .map(|identity| identity.0.as_str())
+                .collect::<Vec<_>>(),
+            ["x", "first", "second"],
+            "source order determines the primary identity and two explicit aliases"
+        );
+        assert_eq!(identities[0].1, Some(1));
+        assert_eq!(identities[1].1, None);
+        assert_eq!(identities[2].1, None);
+        assert!(identities.iter().all(|identity| identity.4.is_some()));
+        assert!(
+            identities.iter().all(|identity| {
+                matches!(
+                    &identity.2,
+                    DebugLocalTypeKind::TypedPointer { name, .. } if name == "&i32"
+                )
+            }),
+            "optimized debug types must match rustc's surviving `&i32` place"
+        );
+        assert_ne!(
+            identities[0].3, identities[1].3,
+            "each identity retains its own lexical scope"
+        );
+    }
+
+    /// Thin pointers preserve a finite pointee debug tree, while composites,
+    /// fat pointers, and unsupported pointees retain the opaque fallback.
+    #[test]
+    fn pointer_debug_types_type_safe_pointees_and_preserve_opaque_fallbacks() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cuda_oxide_pointer_debug_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture = root.join("pointer_debug_fixture.rs");
+        std::fs::write(
+            &fixture,
+            r#"
+pub struct Pair {
+    pub first: u32,
+    pub second: u64,
+}
+
+pub struct Node {
+    pub next: *const Node,
+    pub value: u32,
+}
+
+pub fn pointer_debug_types(
+    _thin: *mut u32,
+    _reference: &u64,
+    _nested: *const *mut i32,
+    _array: *const [u16; 4],
+    _composite: *const Pair,
+    _tuple: *const (u32, u64),
+    _fat: *const [u8],
+    _fat_reference: &str,
+    _unsupported: *const fn(),
+    _unit: *const (),
+    _char: *const char,
+    _self_referential: *const Node,
+) {}
+"#,
+        )
+        .unwrap();
+
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let sysroot_output = std::process::Command::new(rustc)
+            .args(["--print", "sysroot"])
+            .output()
+            .expect("query rustc sysroot");
+        assert!(sysroot_output.status.success(), "rustc --print sysroot");
+        let sysroot = String::from_utf8(sysroot_output.stdout)
+            .expect("sysroot path is UTF-8")
+            .trim()
+            .to_string();
+
+        let args = vec![
+            "rustc".to_string(),
+            "--edition=2024".to_string(),
+            "--crate-type=rlib".to_string(),
+            "--crate-name=pointer_debug_fixture".to_string(),
+            "--emit=metadata".to_string(),
+            "-Zmir-opt-level=0".to_string(),
+            format!("--out-dir={}", root.display()),
+            format!("--sysroot={sysroot}"),
+            fixture.display().to_string(),
+        ];
+
+        let debug_types = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                rustc_public::run!(&args, || {
+                    let body = rustc_public::all_local_items()
+                        .into_iter()
+                        .find_map(|item| item.body())
+                        .expect("fixture function has a body");
+                    let debug_types = body
+                        .locals()
+                        .iter()
+                        .skip(1) // return place
+                        .take(12)
+                        .map(|decl| debug_type_for_ty(&decl.ty))
+                        .collect::<Vec<_>>();
+                    std::ops::ControlFlow::<(), _>::Continue(debug_types)
+                })
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+            .expect("in-process fixture compilation succeeds");
+
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(debug_types.len(), 12, "one debug type result per argument");
+
+        let Some(DebugLocalTypeKind::TypedPointer {
+            name,
+            size_bits,
+            pointee,
+        }) = &debug_types[0]
+        else {
+            panic!(
+                "thin raw pointer must be described, got {:?}",
+                debug_types[0]
+            );
+        };
+        assert_eq!(name, "*mut u32");
+        assert_eq!(*size_bits, 64);
+        assert!(matches!(
+            pointee.as_ref(),
+            DebugLocalTypeKind::Basic {
+                name,
+                size_bits: 32,
+                encoding: "DW_ATE_unsigned",
+            } if name == "u32"
+        ));
+
+        let Some(DebugLocalTypeKind::TypedPointer {
+            name,
+            size_bits,
+            pointee,
+        }) = &debug_types[1]
+        else {
+            panic!("thin reference must be described, got {:?}", debug_types[1]);
+        };
+        assert_eq!(name, "&u64");
+        assert_eq!(*size_bits, 64);
+        assert!(matches!(
+            pointee.as_ref(),
+            DebugLocalTypeKind::Basic {
+                name,
+                size_bits: 64,
+                encoding: "DW_ATE_unsigned",
+            } if name == "u64"
+        ));
+
+        let Some(DebugLocalTypeKind::TypedPointer {
+            name,
+            size_bits,
+            pointee,
+        }) = &debug_types[2]
+        else {
+            panic!(
+                "nested thin pointer must be described, got {:?}",
+                debug_types[2]
+            );
+        };
+        assert_eq!(name, "*const *mut i32");
+        assert_eq!(*size_bits, 64);
+        assert!(matches!(
+            pointee.as_ref(),
+            DebugLocalTypeKind::TypedPointer {
+                name,
+                size_bits: 64,
+                pointee,
+            } if name == "*mut i32" && matches!(
+                pointee.as_ref(),
+                DebugLocalTypeKind::Basic {
+                    name,
+                    size_bits: 32,
+                    encoding: "DW_ATE_signed",
+                } if name == "i32"
+            )
+        ));
+
+        let Some(DebugLocalTypeKind::TypedPointer {
+            name,
+            size_bits,
+            pointee,
+        }) = &debug_types[3]
+        else {
+            panic!(
+                "pointer to fixed array must be described, got {:?}",
+                debug_types[3]
+            );
+        };
+        assert_eq!(name, "*const [u16; 4]");
+        assert_eq!(*size_bits, 64);
+        assert!(matches!(
+            pointee.as_ref(),
+            DebugLocalTypeKind::Array {
+                name,
+                size_bits: 64,
+                count: 4,
+                element,
+            } if name == "[u16; 4]" && matches!(
+                element.as_ref(),
+                DebugLocalTypeKind::Basic {
+                    name,
+                    size_bits: 16,
+                    encoding: "DW_ATE_unsigned",
+                } if name == "u16"
+            )
+        ));
+
+        fn assert_opaque_pointer(ty: &Option<DebugLocalTypeKind>, expected_name: &str) {
+            let Some(DebugLocalTypeKind::Pointer { name, size_bits }) = ty else {
+                panic!("unsupported pointer must retain opaque metadata, got {ty:?}");
+            };
+            assert_eq!(name, expected_name);
+            assert_eq!(*size_bits, 64, "compatibility fallback preserves old width");
+        }
+
+        assert_opaque_pointer(&debug_types[4], "*const _");
+        assert_opaque_pointer(&debug_types[5], "*const _");
+        assert_opaque_pointer(&debug_types[6], "*const _");
+        assert_opaque_pointer(&debug_types[7], "&_");
+        assert_opaque_pointer(&debug_types[8], "*const _");
+        assert_opaque_pointer(&debug_types[9], "*const _");
+        assert_opaque_pointer(&debug_types[10], "*const _");
+        assert_opaque_pointer(&debug_types[11], "*const _");
+    }
+
+    /// Closure environments must be described as composite debug types with
+    /// member offsets taken from rustc's real layout, not declaration order.
+    ///
+    /// `debug_type_for_ty` needs a live compiler session (closure types and
+    /// layouts only exist inside one), so this test drives the pinned rustc
+    /// in-process on a small fixture via `rustc_public::run!`, extracts the
+    /// closure-typed local, and asserts on the returned plain data outside
+    /// the session. The fixture is compiled with the same MIR flags
+    /// cargo-oxide uses for full device debug (`-Copt-level=3` with
+    /// ScalarReplacementOfAggregates and SingleUseConsts disabled), so the
+    /// closure local survives to MIR as in a real full-debug build.
+    ///
+    /// The `u32`-before-`u64` capture order is deliberate: rustc's layout
+    /// sorts closure fields by descending alignment, placing the `u64` at
+    /// offset 0 and the `u32` at offset 8. Sequential declaration-order
+    /// offsets would put `capture_0` at 0, so this fails loudly if the
+    /// composite type ever stops using the layout's field offsets.
+    #[test]
+    fn closure_environment_debug_type_uses_layout_offsets() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cuda_oxide_closure_debug_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture = root.join("closure_debug_fixture.rs");
+        std::fs::write(
+            &fixture,
+            r#"
+pub fn closure_host(a: u32, b: u64) -> u32 {
+    let add = move |x: u32| x + a + (b as u32);
+    add(1)
+}
+"#,
+        )
+        .unwrap();
+
+        // The rustup shim resolves the same pinned toolchain this test binary
+        // was built with, so the in-process driver and the sysroot agree.
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let sysroot_output = std::process::Command::new(rustc)
+            .args(["--print", "sysroot"])
+            .output()
+            .expect("query rustc sysroot");
+        assert!(sysroot_output.status.success(), "rustc --print sysroot");
+        let sysroot = String::from_utf8(sysroot_output.stdout)
+            .expect("sysroot path is UTF-8")
+            .trim()
+            .to_string();
+
+        let args = vec![
+            "rustc".to_string(),
+            "--edition=2024".to_string(),
+            "--crate-type=rlib".to_string(),
+            "--crate-name=closure_debug_fixture".to_string(),
+            "--emit=metadata".to_string(),
+            "-Copt-level=3".to_string(),
+            "-Zmir-enable-passes=-JumpThreading".to_string(),
+            "-Zmir-enable-passes=-ScalarReplacementOfAggregates,-SingleUseConsts".to_string(),
+            format!("--out-dir={}", root.display()),
+            format!("--sysroot={sysroot}"),
+            fixture.display().to_string(),
+        ];
+
+        // rustc needs more stack than the default test-thread allowance.
+        let debug_type = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                rustc_public::run!(&args, || {
+                    let closure_ty = rustc_public::all_local_items()
+                        .into_iter()
+                        .filter_map(|item| item.body())
+                        .flat_map(|body| body.locals().to_vec())
+                        .map(|decl| decl.ty)
+                        .find(|ty| matches!(ty.kind(), TyKind::RigidTy(RigidTy::Closure(..))))
+                        .expect("fixture must contain a closure-typed local");
+                    std::ops::ControlFlow::<(), _>::Continue(debug_type_for_ty(&closure_ty))
+                })
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+            .expect("in-process fixture compilation succeeds");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        let Some(DebugLocalTypeKind::Struct {
+            size_bits, members, ..
+        }) = debug_type
+        else {
+            panic!("closure environment must produce a composite debug type, got {debug_type:?}");
+        };
+        assert_eq!(size_bits, 128, "u64 + u32 environment is 16 bytes");
+        assert_eq!(members.len(), 2, "one member per capture");
+
+        assert_eq!(members[0].name, "capture_0");
+        assert_eq!(
+            members[0].offset_bits, 64,
+            "the u32 capture sits after the u64 in rustc's layout"
+        );
+        match &members[0].ty {
+            DebugLocalTypeKind::Basic {
+                name, size_bits, ..
+            } => {
+                assert_eq!(name, "u32");
+                assert_eq!(*size_bits, 32);
+            }
+            other => panic!("capture_0 must be a basic u32, got {other:?}"),
+        }
+
+        assert_eq!(members[1].name, "capture_1");
+        assert_eq!(
+            members[1].offset_bits, 0,
+            "the u64 capture is layout-first despite being declared second"
+        );
+        match &members[1].ty {
+            DebugLocalTypeKind::Basic {
+                name, size_bits, ..
+            } => {
+                assert_eq!(name, "u64");
+                assert_eq!(*size_bits, 64);
+            }
+            other => panic!("capture_1 must be a basic u64, got {other:?}"),
+        }
     }
 }

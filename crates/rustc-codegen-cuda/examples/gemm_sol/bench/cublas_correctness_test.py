@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """cuBLAS + numpy correctness test — matching gemm_sol exactly.
 
 gemm_sol pipeline: FP16 inputs → FP32 accumulation → BF16 output.
@@ -208,7 +210,7 @@ def run_cublas_test(cudart, cublas_lib, a_host, b_host, M, N, K, label):
     c_f32 = c_f32.reshape((M, N))
 
     # Convert F32 → BF16 on host (truncate lower 16 mantissa bits)
-    # This matches what our kernel does: cvt_f32x2_bf16x2
+    # This matches what our kernel does: cvt_bf16x2_f32
     c_bf16_bits = (c_f32.view(np.uint32) >> 16).astype(np.uint16)
 
     # Numpy reference in f32

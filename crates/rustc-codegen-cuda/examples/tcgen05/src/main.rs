@@ -24,14 +24,15 @@
 //! MMA tiles. All tcgen05 instructions in a kernel must use the same
 //! cta_group value.
 //!
-//! NOTE: tcgen05 is Blackwell-only (sm_100/sm_120).
+//! NOTE: tcgen05 is Blackwell datacenter-only (sm_100a).
 //!
 //! Build and run with:
 //!   cargo oxide run tcgen05
 
-use cuda_core::{CudaContext, CudaStream, DeviceBuffer, LaunchConfig, sys};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, CudaStream, DeviceBuffer, sys};
 use cuda_device::barrier::Barrier;
-use cuda_device::shared::SharedArray;
+use cuda_device::shared::{SharedArray, cvta_generic_to_shared_offset};
 use cuda_device::tcgen05::{
     self, Tcgen05AccumulatorType, Tcgen05ElementType, Tcgen05InstructionDescriptor,
     Tcgen05MmaShape, Tcgen05SmemDescriptor, Tcgen05SwizzleMode, tcgen05_alloc, tcgen05_alloc_cg2,
@@ -62,7 +63,7 @@ mod kernels {
             let gid = thread::index_1d();
 
             // Test SMEM descriptor builder (single-thread)
-            let smem_addr = &raw const SMEM as *const u8 as u64;
+            let smem_addr = cvta_generic_to_shared_offset(&raw const SMEM as *const u8);
             let desc = Tcgen05SmemDescriptor::builder()
                 .address(smem_addr)
                 .leading_dim_bytes(128)
@@ -133,7 +134,7 @@ mod kernels {
             }
             thread::sync_threads();
 
-            let smem_addr = &raw const SMEM as *const u8 as u64;
+            let smem_addr = cvta_generic_to_shared_offset(&raw const SMEM as *const u8);
             let desc = Tcgen05SmemDescriptor::builder()
                 .address(smem_addr)
                 .leading_dim_bytes(128)
@@ -191,7 +192,7 @@ mod kernels {
 
             // Step 3: Copy A from SMEM to TMEM
             if tid == 0 {
-                let smem_a_addr = &raw const SMEM_A as *const u8 as u64;
+                let smem_a_addr = cvta_generic_to_shared_offset(&raw const SMEM_A as *const u8);
                 let a_desc = Tcgen05SmemDescriptor::builder()
                     .address(smem_a_addr)
                     .leading_dim_bytes(1024)
@@ -206,7 +207,7 @@ mod kernels {
 
             // Step 4: Issue MMA
             if tid == 0 {
-                let smem_b_addr = &raw const SMEM_B as *const u8 as u64;
+                let smem_b_addr = cvta_generic_to_shared_offset(&raw const SMEM_B as *const u8);
                 let b_desc = Tcgen05SmemDescriptor::builder()
                     .address(smem_b_addr)
                     .leading_dim_bytes(1024)
@@ -305,11 +306,16 @@ mod kernels {
         }
     }
 
-    /// Keeps every base tcgen05 MMA form in device code.
+    /// Keeps the cta_group::1 base tcgen05 MMA forms in device code.
     ///
-    /// This kernel is compile-only and is never launched.
+    /// This kernel is compile-only and is never launched. The base MMA
+    /// coverage is split by CTA group because ptxas enforces one tcgen05
+    /// granularity per function ("Function ... uses single CTA
+    /// (.cta_group::1) and CTA pair granularity (.cta_group::2) and that is
+    /// not allowed"); a mixed kernel makes the whole module unassemblable
+    /// and unloadable, taking the runtime test kernels down with it.
     #[kernel]
-    pub unsafe fn compile_tcgen05_mma_base(
+    pub unsafe fn compile_tcgen05_mma_base_cg1(
         d_tmem: u32,
         a_tmem: u32,
         metadata_tmem: u32,
@@ -319,11 +325,8 @@ mod kernels {
     ) {
         unsafe {
             tcgen05::tcgen05_mma_shared::<0, 1, 0>(d_tmem, a_desc, b_desc, idesc, false);
-            tcgen05::tcgen05_mma_shared::<1, 2, 1>(d_tmem, a_desc, b_desc, idesc, false);
             tcgen05::tcgen05_mma_shared::<2, 1, 2>(d_tmem, a_desc, b_desc, idesc, false);
-            tcgen05::tcgen05_mma_shared::<3, 2, 3>(d_tmem, a_desc, b_desc, idesc, false);
             tcgen05::tcgen05_mma_tensor::<0, 1, 0>(d_tmem, a_tmem, b_desc, idesc, false);
-            tcgen05::tcgen05_mma_tensor_ashift::<1, 2, 1>(d_tmem, a_tmem, b_desc, idesc, false);
             tcgen05::tcgen05_mma_sp_shared::<2, 1, 2>(
                 d_tmem,
                 a_desc,
@@ -332,7 +335,7 @@ mod kernels {
                 false,
                 metadata_tmem,
             );
-            tcgen05::tcgen05_mma_sp_tensor::<3, 2, 3>(
+            tcgen05::tcgen05_mma_sp_tensor_ashift::<0, 1, 0>(
                 d_tmem,
                 a_tmem,
                 b_desc,
@@ -340,7 +343,28 @@ mod kernels {
                 false,
                 metadata_tmem,
             );
-            tcgen05::tcgen05_mma_sp_tensor_ashift::<0, 1, 0>(
+        }
+    }
+
+    /// Keeps the cta_group::2 base tcgen05 MMA forms in device code.
+    ///
+    /// This kernel is compile-only and is never launched. See
+    /// `compile_tcgen05_mma_base_cg1` for why the coverage is split by CTA
+    /// group.
+    #[kernel]
+    pub unsafe fn compile_tcgen05_mma_base_cg2(
+        d_tmem: u32,
+        a_tmem: u32,
+        metadata_tmem: u32,
+        a_desc: u64,
+        b_desc: u64,
+        idesc: u32,
+    ) {
+        unsafe {
+            tcgen05::tcgen05_mma_shared::<1, 2, 1>(d_tmem, a_desc, b_desc, idesc, false);
+            tcgen05::tcgen05_mma_shared::<3, 2, 3>(d_tmem, a_desc, b_desc, idesc, false);
+            tcgen05::tcgen05_mma_tensor_ashift::<1, 2, 1>(d_tmem, a_tmem, b_desc, idesc, false);
+            tcgen05::tcgen05_mma_sp_tensor::<3, 2, 3>(
                 d_tmem,
                 a_tmem,
                 b_desc,
@@ -688,7 +712,7 @@ mod kernels {
             let tmem_addr = *(&raw const TMEM_ADDR as *const u32);
 
             if tid == 0 && block_rank == 0 {
-                let smem_b_addr = &raw const SMEM_B as *const u8 as u64;
+                let smem_b_addr = cvta_generic_to_shared_offset(&raw const SMEM_B as *const u8);
                 let b_desc = Tcgen05SmemDescriptor::builder()
                     .address(smem_b_addr)
                     .leading_dim_bytes(1024)
@@ -704,7 +728,7 @@ mod kernels {
                     .build()
                     .raw();
 
-                let a_smem_addr = &raw const SMEM_A as *const u8 as u64;
+                let a_smem_addr = cvta_generic_to_shared_offset(&raw const SMEM_A as *const u8);
                 let a_desc = Tcgen05SmemDescriptor::builder()
                     .address(a_smem_addr)
                     .leading_dim_bytes(1024)
@@ -795,34 +819,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (major, minor) = ctx.compute_capability()?;
     println!("GPU Compute Capability: sm_{}{}", major, minor);
 
-    if major < 10 {
-        println!("\n⚠️  WARNING: tcgen05 requires sm_100/sm_120 (Blackwell) or newer!");
+    // Gate on the GPUs that can actually execute this module BEFORE trying
+    // to load it (same set as gemm_sol_final; keep in sync with
+    // mir-importer's tcgen05 target support). Deciding "wrong GPU" from a
+    // module-load failure is not sound: the driver reports arch-incompatible
+    // PTX and genuinely malformed PTX with the same CUDA_ERROR_INVALID_PTX,
+    // so a load-error fallback silently converts compiler bugs into a
+    // PTX-only "pass".
+    if !can_execute_tcgen05_ptx(major, minor) {
+        println!("\n⚠️  WARNING: tcgen05 requires sm_100 (datacenter Blackwell)!");
         println!("   Your GPU is sm_{}{}", major, minor);
         if major == 9 {
             println!("   Hopper GPUs use WGMMA, not tcgen05.");
+        } else if major >= 10 {
+            println!("   Consumer Blackwell has no tcgen05.");
         }
+        println!("   PTX was generated successfully; run on sm_100 to execute kernels.");
         return verify_ptx_only();
     }
 
-    let ptx_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tcgen05.ptx");
-    println!("\nLoading PTX from: {}", ptx_path.display());
-    let ptx_file = ptx_path.to_str().ok_or("PTX path is not valid UTF-8")?;
-    let module = match ctx.load_module_from_file(ptx_file) {
+    let module = match kernels::load(&ctx) {
         Ok(m) => m,
         Err(e) => {
-            println!("\n❌ cuModuleLoad failed: {:?} (CUresult = {:?})", e, e.0);
-            if e.0 == sys::cudaError_enum_CUDA_ERROR_INVALID_PTX {
-                println!("   CUDA_ERROR_INVALID_PTX — the driver rejected the PTX.");
-                println!("   PTX target: sm_100a, GPU: sm_{}{}", major, minor);
-                println!(
-                    "   PTX was generated successfully; run on sm_100a hardware to execute kernels."
-                );
-                return verify_ptx_only();
+            // This GPU passed the capability gate above, so the module must
+            // load. CUDA_ERROR_INVALID_PTX here means the driver rejected
+            // the generated PTX itself: a compiler bug, never a "wrong GPU"
+            // situation. Fail loudly instead of degrading to the PTX-only
+            // verification path.
+            let driver_status = match &e {
+                cuda_host::EmbeddedModuleError::Driver(driver) => Some(driver.0),
+                _ => None,
+            };
+            println!("\n❌ embedded module load failed: {e:?} (driver status = {driver_status:?})");
+            if driver_status == Some(sys::cudaError_enum_CUDA_ERROR_INVALID_PTX) {
+                return Err(format!(
+                    "driver rejected the generated PTX as invalid on sm_{major}{minor}, \
+                     which should execute it (CUDA_ERROR_INVALID_PTX): {e:?}"
+                )
+                .into());
             }
             return Err(e.into());
         }
     };
-    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
     println!("✓ PTX loaded successfully\n");
 
     run_tcgen05_fence_test(&stream, &module)?;
@@ -838,6 +876,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// Keep this execution set in sync with mir-importer's tcgen05 target
+// support (and with gemm_sol_final's copy). Other GPU generations may
+// inspect and assemble the generated artifact, but must not turn a
+// module-load failure into an execution pass.
+fn can_execute_tcgen05_ptx(major: i32, minor: i32) -> bool {
+    matches!((major, minor), (10, 0) | (10, 1) | (10, 3) | (11, 0))
+}
+
 fn verify_ptx_only() -> Result<(), Box<dyn std::error::Error>> {
     let ptx_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tcgen05.ptx");
 
@@ -848,8 +894,18 @@ fn verify_ptx_only() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n📝 PTX Verification:");
     println!("   PTX file generated at: {}", ptx_path.display());
 
+    // Assemble for the arch the module actually targets (read from the PTX
+    // `.target` line). The old hardcoded `-arch=sm_120a` could never succeed
+    // against this sm_100a-target module and only printed noise.
+    let ptx = std::fs::read_to_string(&ptx_path)?;
+    let arch = ptx
+        .lines()
+        .find_map(|line| line.strip_prefix(".target "))
+        .map(|rest| rest.split([',', ' ']).next().unwrap_or(rest).to_string())
+        .unwrap_or_else(|| "sm_100a".to_string());
+
     let ptxas_result = std::process::Command::new("ptxas")
-        .arg("-arch=sm_120a")
+        .arg(format!("-arch={arch}"))
         .arg(&ptx_path)
         .arg("-o")
         .arg("/dev/null")
@@ -857,11 +913,21 @@ fn verify_ptx_only() -> Result<(), Box<dyn std::error::Error>> {
 
     match ptxas_result {
         Ok(output) if output.status.success() => {
-            println!("   ✓ PTX validated by ptxas (sm_120a)");
+            println!("   ✓ PTX validated by ptxas ({arch})");
         }
         Ok(output) => {
-            println!("   ⚠️  ptxas validation failed:");
-            println!("      {}", String::from_utf8_lossy(&output.stderr));
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            // A ptxas that predates this arch (or this PTX ISA) cannot
+            // judge the module; only a real assembly rejection is fatal.
+            if stderr.contains("is not defined for option 'gpu-name'")
+                || stderr.contains("Unsupported .version")
+            {
+                println!("   ℹ️  installed ptxas is too old for {arch} - cannot validate PTX");
+            } else {
+                return Err(
+                    format!("ptxas -arch={arch} rejected the generated PTX:\n{stderr}").into(),
+                );
+            }
         }
         Err(_) => {
             println!("   ℹ️  ptxas not found - cannot validate PTX");

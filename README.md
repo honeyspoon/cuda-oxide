@@ -3,10 +3,11 @@
   <a href="https://github.com/NVlabs/cuda-oxide/actions/workflows/examples-compile.yml"><img alt="examples" src="https://img.shields.io/github/actions/workflow/status/NVlabs/cuda-oxide/examples-compile.yml?branch=main&style=flat-square&logo=github-actions&logoColor=white&label=examples"></a>
   <a href="https://discord.gg/ZUEr4AhH5C"><img alt="discord" src="https://img.shields.io/discord/1515530041767759993?style=flat-square&logo=discord&logoColor=white&label=discord&color=5865F2"></a>
   <br>
-  <img src="assets/logo.png" alt="cuda-oxide logo" width="100%">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.png">
+    <img src="assets/banner-light.png" alt="cuda-oxide: write CUDA (SIMT) kernels in pure Rust" width="640">
+  </picture>
 </p>
-
-# cuda-oxide
 
 cuda-oxide is a custom rustc backend for compiling GPU kernels in pure Rust.
 The workspace combines:
@@ -20,7 +21,7 @@ The workspace combines:
 
 ## Project Status
 
-cuda-oxide is an experimental compiler that demonstrates how CUDA SIMT kernels can be written natively in pure Rust -- no DSLs, no foreign language bindings -- and made available to the broader Rust community. The project is in an early stage (alpha) and under active development: you should expect bugs, incomplete features, and API breakage as we work to improve it. That said, we hope you'll try it in your own work and help shape its direction by sharing feedback on your experience.
+CUDA SIMT kernels can be written natively in pure Rust -- no DSLs, no foreign language bindings -- and made available to the broader Rust community. The project is in an early stage (alpha) and under active development: you should expect bugs, incomplete features, and API breakage as we work to improve it. That said, we hope you'll try it in your own work and help shape its direction by sharing feedback on your experience.
 
 Please see [CONTRIBUTING.md](CONTRIBUTING.md) if you're interested in contributing to the project.
 
@@ -28,7 +29,8 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md) if you're interested in contributi
 
 ```rust
 use cuda_device::{cuda_module, kernel, thread, DisjointSlice};
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, DeviceBuffer};
 
 // Device: generic kernel that applies any function to each element.
 // F can be a closure with captures — rustc monomorphizes it to a concrete type.
@@ -91,7 +93,7 @@ lazy `DeviceOperation`, and execution happens when you call `.sync()` or
 `.await`.
 
 ```rust
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::simt::device_operation::DeviceOperation;
 
 // Assuming `module`, `input`, and `output` come from the cuda-async setup:
 let factor = 2.5f32;
@@ -108,7 +110,7 @@ launch.sync()?;
 // or: .await?;
 ```
 
-See the `async_mlp` example and `crates/cuda-async/README.md` for the full async setup.
+See the `async_mlp` example for the full async setup. The host runtime (`cuda-core`, `cuda-async`) is shared with cutile-rs and published from [NVlabs/cutile-rs](https://github.com/NVlabs/cutile-rs); the cuda-oxide SIMT surface lives under its `simt` modules.
 
 ```bash
 # Build and run an example
@@ -128,7 +130,18 @@ cargo oxide sanitize vecadd --tool memcheck
 
 # Debug with cuda-gdb
 cargo oxide debug vecadd --tui
+
+# Run Cargo tests through the cuda-oxide backend
+cargo oxide test
+
+# Compile a crate's device code to a binary LTOIR artifact in one step
+cargo oxide emit-ltoir
+
+# Refresh the cached codegen backend
+cargo oxide update
 ```
+
+`cargo oxide --help` lists every subcommand.
 
 ## Setup
 
@@ -136,7 +149,7 @@ cargo oxide debug vecadd --tui
 
 - **cargo-oxide** — cargo subcommand that drives the build pipeline (`cargo oxide run`, `build`, `sanitize`, `debug`, etc.)
 - **Rust nightly** with `rust-src` and `rustc-dev` and `llvm-tools` components (pinned in `rust-toolchain.toml`)
-- **CUDA Toolkit** (12.x+)
+- **CUDA Toolkit** (13.0+, including the cuRAND headers; `libcurand-dev` on Ubuntu). The shared `cuda-bindings` crate loads `libcuda` at run time and needs a CUDA 13.x driver (R580+)
 - **Clang + libclang dev headers** (`clang-21` / `libclang-common-21-dev`) — needed by `bindgen` when building the host `cuda-bindings` crate
 - **Linux** (tested on Ubuntu 24.04)
 
@@ -149,7 +162,7 @@ Inside the cuda-oxide repo, `cargo oxide` works out of the box via a workspace a
 For use outside the repo (your own projects), install it with the pinned nightly toolchain:
 
 ```bash
-cargo +nightly-2026-04-03 install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
+cargo +nightly-2026-08-28 install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 
 On first run, `cargo-oxide` will automatically fetch and build the codegen backend.
@@ -168,8 +181,8 @@ nix run github:NVlabs/cuda-oxide#new my-project   # bootstrap a project
 ```bash
 # Toolchain installed automatically via rust-toolchain.toml
 # Manual install if needed:
-rustup toolchain install nightly-2026-04-03
-rustup component add rust-src rustc-dev llvm-tools --toolchain nightly-2026-04-03
+rustup toolchain install nightly-2026-08-28
+rustup component add rust-src rustc-dev rust-analyzer clippy rustfmt llvm-tools --toolchain nightly-2026-08-28
 ```
 
 #### CUDA
@@ -199,7 +212,7 @@ sudo ./llvm.sh 21
 llc-21 --version | grep nvptx
 ```
 
-The pipeline prefers `llc` in Rust toolchain, and auto-discovers `llc-22` and `llc-21` on `PATH` (in that order).
+The pipeline prefers `llc` in Rust toolchain, and auto-discovers `llc-23`, `llc-22`, and `llc-21` on `PATH` (in that order).
 To pin a specific binary, set `CUDA_OXIDE_LLC=/usr/bin/llc-21`.
 
 > We emit TMA / tcgen05 / WGMMA intrinsics that `llc` from LLVM 20 and earlier can't handle.
@@ -245,7 +258,7 @@ compiles a Rust kernel to PTX, launches it on the GPU, and prints
 
 ## Examples
 
-**60+ examples** in `crates/rustc-codegen-cuda/examples/`. Highlights:
+**190+ examples** in `crates/rustc-codegen-cuda/examples/`. Highlights:
 
 | Example              | Description                                                              |
 |----------------------|--------------------------------------------------------------------------|
@@ -278,13 +291,16 @@ cargo oxide run gemm_sol_final
 | Crate               | Description                                                               |
 |---------------------|---------------------------------------------------------------------------|
 | `cuda-device`       | Device intrinsics (`thread::*`, `warp::*`, barriers)                      |
+| `cuda-intrinsics`   | Generated low-level CUDA intrinsic declarations                           |
 | `cuda-host`         | Typed module loading, launch helpers, LTOIR loader                        |
 | `cuda-macros`       | Proc macros (`#[cuda_module]`, `#[kernel]`, `gpu_printf!`)                |
-| `cuda-bindings`     | Raw `bindgen` FFI bindings to `cuda.h`                                    |
-| `cuda-core`         | Safe RAII wrappers (`CudaContext`, `CudaStream`, `DeviceBuffer<T>`, ...)  |
-| `cuda-async`        | Async execution layer (`DeviceOperation`, `DeviceFuture`, `DeviceBox<T>`) |
+| `cuda-bindings`     | Raw `bindgen` FFI bindings to `cuda.h` (shared with cutile-rs)             |
+| `cuda-core`         | Safe RAII wrappers (`CudaContext`, `DeviceBuffer<T>`, ...); SIMT API under `cuda_core::simt` |
+| `cuda-async`        | Async layer (`DeviceOperation`, `DeviceBox<T>`, ...); SIMT API under `cuda_async::simt` |
 | `libnvvm-sys`       | `dlopen` bindings to libNVVM (used by `cuda-host::ltoir`)                 |
+| `cuda-target-spec`  | Shared CUDA target parsing and recorded LLVM PTX-floor policy             |
 | `nvjitlink-sys`     | `dlopen` bindings to nvJitLink (used by `cuda-host::ltoir`)               |
+| `ptx-parse`         | Lossless structural views over PTX source text                            |
 
 ### Compiler Crates
 
@@ -294,14 +310,26 @@ cargo oxide run gemm_sol_final
 | `mir-importer`       | Rust MIR -> `dialect-mir` translation + pipeline      |
 | `mir-lower`          | `dialect-mir` -> LLVM dialect lowering                |
 | `dialect-mir`        | pliron dialect modelling Rust MIR                     |
+| `dialect-iket`       | pliron dialect modelling in-kernel event tracing      |
+| `iket-lower`         | `dialect-iket` profiles + instrumentation lowering    |
 | `llvm-export`        | pliron-llvm shim + textual `.ll` exporter             |
 | `dialect-nvvm`       | pliron dialect modelling NVVM intrinsics              |
+| `dialect-ptx`        | pliron dialect modelling structured PTX               |
+| `mir-transforms`     | Optimization passes over the MIR dialect (loop unroll, ...) |
+| `nvvm-transforms`    | Target-aware LLVM dialect legalization for NVVM      |
+| `cuda-oxide-codegen` | Rustc-independent PTX backend                        |
 
 ### Build Tooling
 
-| Crate          | Description                                          |
-|----------------|------------------------------------------------------|
-| `cargo-oxide`  | Cargo subcommand (`cargo oxide run`, etc.)           |
+| Crate                     | Description                                                    |
+|---------------------------|----------------------------------------------------------------|
+| `cargo-oxide`             | Cargo subcommand (`cargo oxide run`, etc.)                     |
+| `cuda-intrinsics-gen`     | Extractor and deterministic source generator for the intrinsics |
+| `cuda-artifact-finalizer` | Driver-independent NVVM IR, LTOIR, and PTX finalization         |
+| `oxide-artifacts`         | Architecture-neutral embedded device artifact metadata         |
+| `reserved-oxide-symbols`  | Workspace-private `cuda_oxide_*` symbol-name contract          |
+| `fuzzer`                  | Differential codegen fuzzer support (rustlantis adapter)       |
+| `ptx-schedule`            | PTX schedule-perturbation fuzzing (nanosleep injection campaigns) |
 
 ### Documentation
 
@@ -323,7 +351,7 @@ cargo oxide run gemm_sol_final
 - LTOIR generation for Blackwell+ (device-side LTO)
 - Device FFI: Rust <-> C++/CCCL interop via LTOIR
 - MathDx integration: cuFFTDx thread-level FFT, cuBLASDx block-level GEMM
-- Tile interop (experimental): [`cutile_inter_kernel`](crates/rustc-codegen-cuda/examples/cutile_inter_kernel/README.md) chains a cutile-rs Tile kernel and a cuda-oxide SIMT PTX kernel on the same CUDA stream over shared device tensors. Intra-kernel Tile interop is work in progress and tracked in [#96](https://github.com/NVlabs/cuda-oxide/issues/96).
+- Tile interop: [`cutile_inter_kernel`](crates/rustc-codegen-cuda/examples/cutile_inter_kernel/README.md) chains a cutile-rs Tile kernel and a cuda-oxide SIMT PTX kernel on the same CUDA stream over shared device tensors. Intra-kernel Tile interop is work in progress and tracked in [#96](https://github.com/NVlabs/cuda-oxide/issues/96).
 - Host runtime: `cuda-core` (explicit control, pinned host transfers) and `cuda-async` (composable async operations)
 - Canonical Blackwell GEMM SoL example with size-specialized M256xN256/M512xN256 CLC + cta_group::2 kernels and vectorized epilogues (see `gemm_sol_final`)
 

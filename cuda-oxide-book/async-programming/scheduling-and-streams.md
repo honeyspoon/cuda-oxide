@@ -140,7 +140,7 @@ Before any async operation can run, you initialize the thread-local device
 context:
 
 ```rust
-use cuda_async::device_context::init_device_contexts;
+use cuda_async::simt::device_context::init_device_contexts;
 
 init_device_contexts(0, 1)?;
 ```
@@ -297,7 +297,9 @@ timing requires events created **without** `CU_EVENT_DISABLE_TIMING` -- pass
 explicit flags to enable timing:
 
 ```rust
-use cuda_bindings::CUevent_flags_enum::CU_EVENT_DEFAULT;
+// bindgen flattens the CUDA enums, so the constant is a crate-root item
+// named after its enum, not a variant inside a module.
+use cuda_bindings::CUevent_flags_enum_CU_EVENT_DEFAULT as CU_EVENT_DEFAULT;
 
 let start = stream.record_event(Some(CU_EVENT_DEFAULT))?;
 // SAFETY: config and arguments satisfy my_kernel's requirements.

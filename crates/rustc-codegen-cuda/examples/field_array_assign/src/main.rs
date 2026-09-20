@@ -16,7 +16,8 @@
 //!
 //! Run: cargo oxide run field_array_assign
 
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, DeviceBuffer};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_module;
 
@@ -43,7 +44,10 @@ mod kernels {
         pkt.data[0] = scale * i;
         pkt.data[3] = scale * i + 3;
 
-        // (Field, Index) projections via a runtime variable
+        // (Field, Index) projections via a runtime variable. The indexed
+        // range loop is the pattern under test: an iterator rewrite would
+        // erase the runtime-index MIR projection this regression exercises.
+        #[allow(clippy::needless_range_loop)]
         for k in 1usize..3 {
             pkt.data[k] = scale * i + k as u32;
         }

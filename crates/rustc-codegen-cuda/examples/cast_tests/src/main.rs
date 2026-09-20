@@ -24,7 +24,8 @@
 //! the correct LLVM instruction. Struct↔ptr conversions (fat pointers, newtypes)
 //! are handled generically via `emit_pointer_cast` in mir-lower.
 
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, DeviceBuffer};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_module;
 
@@ -418,9 +419,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = CudaContext::new(0)?;
     let stream = ctx.default_stream();
 
-    let module = ctx.load_module_from_file("cast_tests.ptx")?;
-    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
-
+    let module = kernels::load(&ctx)?;
     const N: usize = 1;
     let cfg = LaunchConfig::for_num_elems(N as u32);
 

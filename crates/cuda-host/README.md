@@ -8,7 +8,8 @@ keep `#[kernel]` on the actual GPU entry points, then load the embedded device
 artifact as a typed Rust value.
 
 ```rust
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, DeviceBuffer};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_module;
 
@@ -73,12 +74,31 @@ Kernel parameters are mapped into host launch parameters:
 | `&[T]` | `&DeviceBuffer<T>` |
 | `&mut [T]` | `&mut DeviceBuffer<T>` |
 | `DisjointSlice<T>` | `&mut DeviceBuffer<T>` |
+| `Uniform<T>` | `T` |
 | `Copy` scalar, struct, closure, or raw pointer | unchanged |
+
+A `Uniform<T>` parameter takes the bare scalar on the host because the host is
+what makes the value uniform: one marshalled value reaches every thread of the
+launch. The device side receives the witness, which is what device APIs needing
+a launch-uniform scalar require in place of an `unsafe` assertion.
+
+A slice whose index space carries a runtime row width takes `RowWidth<T>`, which
+binds the width to that slice for the launch. The same reasoning applies and for
+the same reason, one step earlier: the row width reaches the device as one word the
+host wrote, so `DisjointSlice::tile_2d32_rt` needs neither a stride argument nor
+an `unsafe` assertion. The owned async launches take `RowWidthOwned<B>`.
 
 Because the launches are ordinary methods, rust-analyzer and rustc can complete
 kernel names, show argument names, and type-check arguments before the program
 runs. By-value arguments are copied into the CUDA launch packet through the
 `KernelScalar` boundary; device slices are encoded as pointer-plus-length pairs.
+
+Generated slice adapters check the actual device address before enqueueing a
+launch, including borrowed and owned async launches. A nonempty allocation must
+be non-null and aligned for `T`; an incompatible address panics before launch.
+CUDA allocation alone does not guarantee arbitrary `#[repr(align(N))]` Rust
+types. Empty slices and slices of zero-sized types use a non-null, aligned
+sentinel in the launch packet, without changing or allocating their buffer.
 
 `LaunchConfig` is safe to create because it is only data. Launching with one is
 unsafe because its dimensions and resource values are not tied to the kernel:
@@ -186,7 +206,7 @@ Enable the `async` feature to generate async launch methods. They use the same
 scalar mapping, but take no stream argument:
 
 ```rust
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::simt::device_operation::DeviceOperation;
 
 let module = kernels::load_async(0)?;
 let launch = unsafe {
@@ -202,7 +222,7 @@ launch.sync()?;
 ```
 
 For async launches, device-slice parameters accept either `DeviceBuffer<T>` or
-`cuda_async::device_box::DeviceBox<[T]>`. The mutable
+`cuda_async::simt::device_box::DeviceBox<[T]>`. The mutable
 `AsyncKernelLaunchBuilder` collects arguments and options. Finalizing it with a
 raw configuration is unsafe and produces an immutable `AsyncKernelLaunch<'_>`;
 geometry cannot be changed after that point. Rust keeps referenced buffers and
@@ -341,5 +361,5 @@ specific 8x8 tile arrangements:
 
 - [cuda-device](../cuda-device/) -- device-side intrinsics
 - [cuda-macros](../cuda-macros/) -- proc-macro implementations
-- [cuda-core](../cuda-core/) -- CUDA driver API, `DeviceBuffer`, `LaunchConfig`
-- [cuda-async](../cuda-async/) -- async scheduling
+- [cuda-core](https://github.com/NVlabs/cutile-rs/tree/main/cuda-core) -- shared CUDA driver API crate; `DeviceBuffer`, `simt::LaunchConfig`
+- [cuda-async](https://github.com/NVlabs/cutile-rs/tree/main/cuda-async) -- shared async crate; the SIMT model lives under `cuda_async::simt`

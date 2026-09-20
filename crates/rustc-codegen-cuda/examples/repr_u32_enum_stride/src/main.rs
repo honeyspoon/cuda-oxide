@@ -1,4 +1,4 @@
-// Copyright (c) 2024-2026 NVIDIA CORPORATION. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 /*
@@ -45,7 +45,8 @@
  *   cargo oxide run repr_u32_enum_stride
  */
 
-use cuda_core::{CudaContext, CudaStream, DeviceBuffer, DeviceCopy, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, CudaStream, DeviceBuffer, DeviceCopy};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_module;
 use std::fmt::Debug;

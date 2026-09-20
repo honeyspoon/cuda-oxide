@@ -17,6 +17,7 @@ roadmap, **N/A** = not applicable or no identified need.
 | HMM / Unified Memory Management | **Full** | GPU directly reads/writes host memory without `cudaMemcpy`. Reference captures in closures leverage HMM for host pointer access. Requires Turing+ GPU, Linux 6.1.24+, CUDA 12.2+. |
 | Unified Struct ABI (no `#[repr(C)]`) | **Full** | Device struct layout matches host exactly. The compiler queries rustc's actual layout and reproduces it with explicit padding in LLVM IR. Works with `#[repr(Rust)]` default. |
 | Dynamic Layout Matching | **Full** | Compiler queries rustc's `fields_by_offset_order()` and byte offsets, builds LLVM structs with correct field order and explicit padding bytes. Independent of LLVM's datalayout. |
+| Packed Layouts (`#[repr(packed)]`) | **Partial** | Field addresses formed through a pointer (`addr_of!((*p).field)`) use rustc's exact byte offsets, so `read_unaligned`/`write_unaligned` round-trips work, including `packed(N)`. Byte-faithful packed structs can also use packed LLVM storage for by-value construction/load/store and `[Packed; N]` element addressing. Recursively promotable packed constant arrays use the immutable-device-global path when the selected natural or packed LLVM representation reproduces rustc's field offsets and stored size exactly. Overlapping or otherwise non-representable layouts remain rejected. |
 | Pointer Distance (`offset_from`) | **Full** | `ptr_offset_from` / `ptr_offset_from_unsigned` intrinsics (and the `offset_from`, `offset_from_unsigned`, `byte_offset_from`, `byte_offset_from_unsigned` methods) lower to an address difference divided by the rustc-reported pointee size, returning `isize` (signed) or `usize` (unsigned). Errors on a zero-sized pointee. |
 | Volatile Load/Store | **Full** | `core::ptr::read_volatile` / `write_volatile` carry an explicit volatile bit through MIR import, mem2reg (volatile accesses are never promoted), MIR-to-LLVM lowering, and textual export (`load volatile` / `store volatile`). Emits `ld.volatile` / `st.volatile` in PTX. |
 | Bulk Copy (`copy_nonoverlapping`) | **Full** | `core::ptr::copy_nonoverlapping` lowers to a `mir.memcpy` op and then `llvm.memcpy`, with the element count scaled to bytes for the pointee. The intrinsic overload suffix is derived from the operand address spaces and length width. |
@@ -31,19 +32,86 @@ roadmap, **N/A** = not applicable or no identified need.
 | Array Types (`[T; N]`) | **Full** | Static construction, constant- and runtime-index access. Array value constants (bare and nested) materialized. Mutable arrays auto-promoted to memory-backed. |
 | `CuSimd<T, N>` SIMD Type | **Full** | Generic SIMD register type with named accessors (`x`/`y`/`z`/`w`), runtime and compile-time indexing, `to_array` conversion. |
 | ABI Scalarization | **Full** | Slices are scalarized at kernel boundaries (`&[T]` -> `(ptr, len)`, reconstructed inside the function). Structs and closures pass by value as one byval `.param`; field flattening still applies on internal device-to-device calls. |
+| Grid-constant parameters | **Full** | `#[grid_constant] value: &T` passes `T` by value and retains a grid-wide read-only address. Host launches are unsafe. Nonzero sized pointees without interior mutability, launch-scoped references, and Volta+ targets are required. |
 
 Array value constants support primitive leaves (integers, `f16`, `f32`,
-`f64`), nested arrays, and tuples recursively composed from supported scalar,
+`f64`), nested arrays, and tuples recursively composed of supported scalar,
 enum, tuple, and zero-sized fields. Tuple element strides and field offsets
 come from rustc layout, including internal and trailing padding; direct tuple
 value constants use the same layout-aware decoder. Struct constants (direct
 and promoted-by-reference) also read every field at its rustc layout offset,
 so padded, reordered, `#[repr(C)]`, and nested shapes decode correctly, and a
 struct's stored size is its padded size, which fixes the element stride for
-arrays of padded structs inside constants. Arrays whose elements are structs
-or initialized unions are not yet materialized as constants. Pointer-bearing
-array, tuple, and struct constants are rejected with a diagnostic until
-aggregate relocations can be represented without losing provenance.
+arrays of padded structs inside constants. Pointer-free initialized union
+constants are materialized from rustc's evaluated storage image without
+guessing an active field: initialized bytes are preserved, uninitialized
+inactive bytes remain `undef`, and the byte image is transmuted into the
+layout-exact union type. This includes direct unions, unions nested in tuple or
+struct constants, runtime-indexed `[U; N]`, and `MaybeUninit<T>` constants.
+Bare arrays whose elements are recursively promotable structs use the same
+immutable-device-global path as scalar and tuple tables, avoiding a per-thread
+local table copy for read-only uses. This promotion also admits supported thin
+pointer/reference leaves. Their evaluated byte image remains byte-exact while
+pointer slots are preserved as symbolic device-global relocations, including
+non-zero byte addends into referenced device statics. Relocation targets are
+materialized explicitly, and promoted-global deduplication includes relocation
+identity as well as type and bytes so byte-identical tables that point at
+different statics cannot alias.
+
+Pointer-to-array constants such as `const R: &[Struct; N] = &TABLE` use the same
+promoted immutable global when every element is recursively promotable and the
+converted storage size matches rustc's layout. When the outer pointer selects a
+subrange of a backing allocation, relocation source offsets inside that range
+are rebased into the promoted initializer while preserving their target and
+addend. Unsupported bare array constants retain the existing element-wise
+fallback where available; pointer-to-array constants continue to fail closed
+when no correct fallback exists. Zero-byte over-aligned struct leaves (for
+example, `repr(align(N))` ZSTs) remain on the existing alignment-sensitive value
+path instead of this promotion path. Promotion includes `repr(packed)` and
+`repr(packed(N))` structs when lowering can reproduce their recorded field
+offsets with an exact packed LLVM struct; the value and reference forms
+deduplicate to the same immutable initializer. Overlapping or otherwise
+non-representable struct layouts remain outside immutable promotion and keep
+the existing fail-closed behavior.
+
+Thin pointer fields in array, tuple, and struct **const** values that do not take
+the immutable-table promotion path are materialized via `MirGlobalAllocOp` per
+field, including non-zero byte addends into a static (see
+`struct_constant_provenance`, `tuple_constant_provenance`,
+`tuple_array_provenance`). The `array_constants` regression also covers a
+promoted pointer-bearing tuple table with both a zero-addend static reference
+and a non-zero static-subobject addend, and verifies that optimized code does
+not retain a per-thread table depot.
+
+Slice fat-pointer fields in aggregate constants are also supported when their
+data pointer relocates to a device static and the pointee is a same-element
+array-to-slice view. Their literal `usize` length metadata is decoded
+independently, including non-zero static byte addends and nested aggregate field
+offsets. Thin-pointer-only union constants preserve the same relocation
+provenance, including non-zero addends, by reconstructing one typed pointer
+carrier instead of transmuting placeholder bytes. Compatible `SharedRef`
+alternatives must have the same translated pointee type; `UniqueRef` union
+constants remain rejected. Raw-pointer
+alternatives may differ only in pointee view while retaining the same raw kind,
+mutability, and address space. Relocation-free pointer/integer unions whose
+storage is exactly one fully initialized, naturally aligned pointer word, whose
+pointer alternatives are generic raw pointers of one kind, and whose integer
+alternatives are full-width may instead use rustc's evaluated byte image. The
+importer transmutes that image only to the integer field and inserts the field
+into the union, so no inactive pointer alternative is materialized.
+Relocation-bearing pointer/integer unions, fat or nested pointer storage in
+unions, over-aligned/padded pointer unions, unsupported fat-pointer metadata,
+and pointer-to-array union constants (`&[U; N]`) remain rejected. Top-level
+thin-pointer-only device-global union initializers may preserve one full-width
+relocation at byte zero; mixed pointer/integer device-global initializers remain
+rejected.
+
+Enum constants preserve payload relocations to device statics, including
+non-zero byte addends. This includes niche-encoded `Option<&T>` and
+direct-tagged enum layouts, both for direct thin-reference payloads and for
+pointers nested inside tuple, struct, or array payload fields. Relocation-carrying
+enum constants can also be nested inside tuple, struct, and array constants.
+Anonymous promoted allocations remain unsupported.
 
 ## Compiler: Closures
 
@@ -81,7 +149,7 @@ aggregate relocations can be represented without losing provenance.
 | Bi-directional LTOIR Support | **Full** | Rust kernels call CUDA C++ device functions **and** C++ calls Rust device functions. Via NVVM IR → libNVVM → LTOIR → nvJitLink. |
 | Device FFI (`extern "C"`) | **Full** | `#[device] extern "C" { fn ... }` declarations for external LTOIR functions. CUB/CCCL integration demonstrated. |
 | MathDx FFI (cuFFTDx / cuBLASDx) | **Full** | cuFFTDx (8/16/32-point thread-level FFT), cuBLASDx (32x32x32 block-level GEMM) via LTOIR. |
-| Tile interop | **Experimental** | Inter-kernel interop works today: a [cutile-rs Tile kernel](https://github.com/NVlabs/cutile-rs) and a cuda-oxide SIMT PTX kernel can run in one host process on the same CUDA stream over shared device tensors. Intra-kernel Tile interop is work in progress and tracked in [#96](https://github.com/NVlabs/cuda-oxide/issues/96). |
+| Tile interop | **Partial** | Inter-kernel interop works today: a [cutile-rs Tile kernel](https://github.com/NVlabs/cutile-rs) and a cuda-oxide SIMT PTX kernel can run in one host process on the same CUDA stream over shared device tensors. Intra-kernel Tile interop is work in progress and tracked in [#96](https://github.com/NVlabs/cuda-oxide/issues/96). |
 | Cross-Crate Kernels | **Full** | Kernels and device functions defined in library crates with monomorphization at the binary crate use site. |
 
 ## Compiler: Functions
@@ -107,7 +175,7 @@ aggregate relocations can be represented without losing provenance.
 | Local Clean | **Full** | `cargo oxide clean` removes project-local `target/` directories and generated device artifacts (`.ptx`, `.ll`, `.opt.ll`, `.ltoir`, `.cubin`, `.target`, `.options`, `.cubin.target`), never the shared `~/.cargo/cuda-oxide/` cache. |
 | Compute Sanitizer Wrapper | **Full** | `cargo oxide sanitize <example>` builds the example and runs the host binary under NVIDIA Compute Sanitizer (`memcheck`, `racecheck`, `initcheck`, or `synccheck`). |
 | cuda-gdb Source Debugging | **Full** | `cargo oxide debug` builds device debug information on the PTX path and launches `cuda-gdb`. Legacy NVVM IR does not yet support debug metadata. |
-| cuda-gdb Local / Argument Inspection | **Partial** | `CUDA_OXIDE_DEBUG=full` is a `-G`-style build (optimization off, locals kept in memory) so `info args`/`info locals` show real values for scalars, pointers/references, and structs/tuples/arrays with their fields. Enums, ABI-split bare slices, closures, and projections (`x.0`) are not yet described. |
+| cuda-gdb Local / Argument Inspection | **Partial** | Full mode keeps supported locals in memory. It disables `ScalarReplacementOfAggregates` and `SingleUseConsts`, keeps `ReferencePropagation` and general MIR inlining, and outlines only `DisjointSlice::get_mut`. Common scalars, pointers, aggregates, closures, enums, and selected projections work; see [Debugging and Error Handling](../gpu-programming/error-handling-and-debugging.md) for current limits. |
 
 ## Compiler: Inline PTX
 
@@ -131,9 +199,9 @@ aggregate relocations can be represented without losing provenance.
 
 | Feature | Status | Description |
 |:--------|:-------|:------------|
-| Device-Scope Atomics | **Full** | `DeviceAtomic{U32,I32,U64,I64,F32,F64}` with `.gpu` scope. All 5 orderings. |
-| Block-Scope Atomics | **Full** | `BlockAtomic{U32,I32,U64,I64,F32,F64}` with `.cta` scope. |
-| System-Scope Atomics | **Full** | `SystemAtomic{U32,I32,U64,I64,F32,F64}` with `.sys` scope. For CPU-GPU shared data. |
+| Device-Scope Atomics | **Full** | `DeviceAtomic{U32,I32,U64,I64,F16,F32,F64}` with `.gpu` scope. All 5 orderings. |
+| Block-Scope Atomics | **Full** | `BlockAtomic{U32,I32,U64,I64,F16,F32,F64}` with `.cta` scope. |
+| System-Scope Atomics | **Full** | `SystemAtomic{U32,I32,U64,I64,F16,F32,F64}` with `.sys` scope. For CPU-GPU shared data. |
 | `core::sync::atomic` Support | **Full** | Standard library atomic types lowered to PTX `atom.sys` instructions. |
 
 ## Runtime Library: Shared Memory
@@ -148,7 +216,7 @@ aggregate relocations can be represented without losing provenance.
 
 | Feature | Status | Description |
 |:--------|:-------|:------------|
-| Thread/Block/Grid Intrinsics | **Full** | `threadIdx`, `blockIdx`, `blockDim`, `gridDim`. Index witnesses are layout-typed; their uniqueness also depends on matching launch dimensionality. `index_2d_runtime(s)` adds a caller-proved stride. See [The Safety Model](../gpu-safety/the-safety-model.md). |
+| Thread/Block/Grid Intrinsics | **Full** | `threadIdx`, `blockIdx`, `blockDim`, `gridDim`. Index witnesses are layout-typed; their uniqueness also depends on matching launch dimensionality. `index_2d_runtime(&slice)` resolves against the slice's own row width, bound once by the host. See [The Safety Model](../gpu-safety/the-safety-model.md). |
 | Block Synchronization | **Full** | `sync_threads()` — thread block barrier. |
 | Async Barriers (mbarrier) | **Full** | Hardware async barriers for Hopper+: init, arrive, test_wait, try_wait, inval. |
 | Cluster Synchronization | **Full** | `cluster_sync()` for all blocks in a cluster. sm_90+. |
@@ -158,9 +226,10 @@ aggregate relocations can be represented without losing provenance.
 
 | Feature | Status | Description |
 |:--------|:-------|:------------|
-| Warp Shuffle Operations | **Full** | `shuffle`, `shuffle_xor`, `shuffle_down`, `shuffle_up` for `i32` and `f32`. |
+| Warp Shuffle Operations | **Full** | `shuffle`, `shuffle_xor`, `shuffle_down`, `shuffle_up`. Unsuffixed forms take `u32`; `_f32`, `_u64`, `_f64` variants and a `_sync` form of each. |
 | Warp Vote Operations | **Full** | `all(pred)`, `any(pred)`, `ballot(pred)` → bitmask. |
 | Lane/Warp ID | **Full** | `lane_id()` (0–31), `warp_id()`. Direct register reads. |
+| Warp Reduction (`redux.sync`) | **Full** | One-instruction full-warp reduction. Integers on sm_80+: `redux_sync_add`, `_min_{u32,i32}`, `_max_{u32,i32}`, `_and`, `_or`, `_xor`. `f32` min/max with optional `.abs` and `.NaN` on `sm_100a`/`sm_100f`/`sm_103a`/`sm_103f`. No `f64` form. |
 
 ## Runtime Library: Cooperative Groups
 
@@ -169,7 +238,7 @@ aggregate relocations can be represented without losing provenance.
 | Typed Group Handles | **Full** | `Grid`, `Cluster`, `ThreadBlock`, `WarpTile<N>` (N ∈ {1,2,4,8,16,32}), `CoalescedThreads`. |
 | Group Universal API | **Full** | `size()`, `thread_rank()`, `sync()` on every group handle. |
 | Warp Tile Partitioning | **Full** | `ThreadBlock::tiled_partition::<N>()` carves a sub-warp `WarpTile<N>`. `coalesced_threads()` materialises the active-lane group. |
-| Warp Collectives | **Full** | `ballot`, `all`, `any`, `shfl`, `shfl_xor`, `shfl_down`, `shfl_up` (`i32` and `f32`); `match_any` / `match_all` (`i32` and `i64`); `active_mask`. |
+| Warp Collectives | **Full** | `ballot`, `all`, `any`, `shfl`, `shfl_xor`, `shfl_down`, `shfl_up` (`u32` and `f32`); `match_any` / `match_all` (`i32` and `i64`); `active_mask`. |
 | Warp Reductions / Scans | **Full** | `warp_reduce`, `warp_scan` (inclusive). `Sum`/`Min`/`Max` for `u32`/`i32`/`f32`; `BitAnd`/`BitOr`/`BitXor` for `u32`. |
 | Block Reductions / Scans | **Full** | `block_reduce`, `block_scan` (inclusive). Const-generic over `NUM_WARPS`; same op/type matrix as warp variants; uses `__shared__` scratch. |
 | Cooperative Kernel Launch | **Full** | `#[cooperative_launch]` on a `#[cuda_module]` kernel (or `unsafe { cuda_launch! { cooperative: true, ... } }`) enables `Grid::sync()` for grid-wide barriers. |
@@ -203,12 +272,24 @@ aggregate relocations can be represented without losing provenance.
 
 ---
 
+## Runtime Library: Matrix and Tensor Cores
+
+| Feature | Status | Description |
+|:--------|:-------|:------------|
+| Warp-Level MMA (`wmma`) | **Full** | Register-only `mma.sync` shapes, `movmatrix`, and warp-cooperative `ldmatrix` loads. |
+| Sparse MMA | **Full** | Structured-sparsity `mma.sp` shapes alongside the dense ones, in the same `wmma` module. |
+| Warpgroup MMA (`wgmma`) | **Partial** | Hopper `sm_90a`: fence/commit/wait pipeline, shared-memory descriptors, and `m64n64k16` MMA with `bf16`/`f16` inputs and `f32` accumulate. Gap: the lowering covers specific proven loop patterns (`bf16` works in straight-line code, counted K-loops, and partial-wait pipelines; `f16` in straight-line code only), and `tf32` calls are rejected pending [#1076](https://github.com/NVlabs/cuda-oxide/issues/1076). |
+| Tensor Core Gen 5 (`tcgen05`) | **Full** | Blackwell sm_100+: TMEM alloc/dealloc, MMA, `stmatrix`, CTA-pair (cg2) variants. |
+| Accumulator Fragment Algebra (`mma_frag`) | **Full** | Index algebra for the `m16n8k16` accumulator, so a lane can address its own slots of the `[f32; 4]` fragment. |
+| FP8 / FP6 / FP4 Formats | **Partial** | Conversions (`convert::cvt_*` for `e4m3`/`e5m2`) and the matrix path (FP8 `mma.sync` shapes, the `mxf8f6f4` shapes, tcgen05 descriptors) ship; the `mma_mxf8f6f4` example compiles them. Gap: no *arithmetic* on these formats. There's no add/mul/min/max the way `f16` and `bf16` have, so values are carried as packed bit patterns and converted before use. |
+
+---
+
 ## Not Yet Implemented
 
 | Feature | Status | Notes |
 |:--------|:-------|:------|
 | Rust `asm!` macro | **Planned** | Use `ptx_asm!` for CUDA inline PTX. Direct lowering of Rust MIR `InlineAsm` is not implemented. |
-| FP8 / MX Data Types | **Planned** | Roadmap item for Blackwell. No architectural limitation. |
 | Dynamic Dispatch (`dyn Trait`) | **N/A** | Use generics with static dispatch. Haven't found a real need for this. |
 | Heap Allocation (`Box`, `Vec`) | **N/A** | CUDA has a device-side heap (`malloc`/`free` in kernels), and the compiler allows the `alloc` crate through -- but no device-side `#[global_allocator]` is wired up today. Even if it were, device `malloc` is extremely slow (serialized, fragmented, uncoalesced). Use slices and `SharedArray`. |
 | `String` / `format_args!` | **N/A** | Use `gpu_printf!` for formatted output. |

@@ -41,7 +41,7 @@ CUDA provides built-in variables (`threadIdx`, `blockIdx`, `blockDim`,
 `gridDim`); cuda-oxide wraps these in the `cuda_device::thread` module:
 
 ```rust
-use cuda_device::{kernel, thread, DisjointSlice};
+use cuda_device::{DisjointSlice, kernel, thread};
 
 #[kernel]
 pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
@@ -160,7 +160,7 @@ for architecture-specific SM resource limits and occupancy calculations.
 On the host side, `LaunchConfig` tells the runtime how to shape the grid:
 
 ```rust
-use cuda_core::LaunchConfig;
+use cuda_core::simt::LaunchConfig;
 
 // Quick 1D launch: 256 threads per block, enough blocks to cover N elements
 let cfg = LaunchConfig::for_num_elems(N as u32);

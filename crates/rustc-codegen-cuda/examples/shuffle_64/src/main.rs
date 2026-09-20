@@ -126,7 +126,8 @@ mod kernels {
 const WARP: usize = 32;
 
 fn main() {
-    use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+    use cuda_core::simt::LaunchConfig;
+    use cuda_core::{CudaContext, DeviceBuffer};
 
     println!("=== 64-bit warp shuffle (u64 / f64) ===\n");
 
@@ -136,11 +137,7 @@ fn main() {
     let (major, minor) = ctx.compute_capability().expect("compute capability");
     println!("GPU Compute Capability: sm_{}{}", major, minor);
 
-    let module = ctx
-        .load_module_from_file("shuffle_64.ptx")
-        .expect("Failed to load PTX module");
-    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
-
+    let module = kernels::load(&ctx).expect("Failed to load embedded CUDA module");
     // A single warp is enough to demonstrate the shuffle semantics.
     let cfg = LaunchConfig {
         block_dim: (WARP as u32, 1, 1),

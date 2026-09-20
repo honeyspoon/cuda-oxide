@@ -29,10 +29,10 @@ mod kernels {
     use super::*;
 
     /// Test kernel: measures clock and global timer ticks for a simple operation.
-    #[kernel]
-    #[launch_bounds(256, 2)] // Max 256 threads/block, min 2 blocks/SM
+    #[kernel] // CUDA_OXIDE_DEBUG_KERNEL_ATTRIBUTE_LINE
+    #[launch_bounds(256, 2)] // CUDA_OXIDE_DEBUG_LAUNCH_BOUNDS_ATTRIBUTE_LINE
     pub fn clock_test(mut output: DisjointSlice<u64>) {
-        let idx = thread::index_1d();
+        let idx = thread::index_1d(); // CUDA_OXIDE_DEBUG_KERNEL_ENTRY_LINE
         if let Some(output_elem) = output.get_mut(idx) {
             let start_cycles = debug::clock64();
             let start_timer = debug::globaltimer();
@@ -128,7 +128,7 @@ mod kernels {
         let idx_raw = idx.get();
         if let Some(output_elem) = output.get_mut(idx) {
             if idx_raw == 0 {
-                debug::breakpoint(); // cuda-gdb stops here for thread 0
+                debug::breakpoint(); // CUDA_OXIDE_DEBUG_INTRINSIC_BREAKPOINT
             }
 
             *output_elem = idx_raw as i32;
@@ -170,15 +170,43 @@ mod kernels {
 // =============================================================================
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+    use cuda_core::simt::LaunchConfig;
+    use cuda_core::{CudaContext, DeviceBuffer};
 
     println!("=== GPU Debug & Utility Intrinsics Test (Unified) ===\n");
 
     let ctx = CudaContext::new(0)?;
     let stream = ctx.default_stream();
 
-    let module = ctx.load_module_from_file("debug.ptx")?;
-    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
+    let module = kernels::load(&ctx)?;
+    // cuda-gdb-only path:
+    // brkpt -> debugger stop -> continue -> output [0, 1, ..., 7]
+    if std::env::args().any(|a| a == "--breakpoint") {
+        println!("--- cuda-gdb mode: breakpoint() ---");
+        const N: usize = 8;
+        let mut output_dev = DeviceBuffer::<i32>::zeroed(&stream, N)?;
+
+        // SAFETY: launch shape/resources match the kernel; the output covers
+        // every access by the one-block, eight-thread launch.
+        unsafe {
+            module.breakpoint_test(
+                (stream).as_ref(),
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (N as u32, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                &mut output_dev,
+            )
+        }?;
+        stream.synchronize()?;
+
+        let output = output_dev.to_host_vec(&stream)?;
+        let expected: Vec<_> = (0..N as i32).collect();
+        assert_eq!(output, expected, "breakpoint_test output mismatch");
+        println!("PASS breakpoint_test: runtime values = {output:?}");
+        return Ok(());
+    }
 
     // ====================================================================
     // Manually invoked failing mode: `debug --fail-assert`
@@ -318,7 +346,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Note: brkpt instruction causes launch failure when not running
         // under cuda-gdb. This is expected behavior.
         println!("  ⚠ Skipping breakpoint_test (requires cuda-gdb)");
-        println!("  To test: cuda-gdb ./target/release/debug");
+        println!("  To test: cuda-gdb --args ./target/release/debug --breakpoint");
         println!("  Then: run and hit breakpoint at thread 0\n");
     }
 

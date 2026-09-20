@@ -9,7 +9,7 @@ This section walks through installing cuda-oxide, creating a project, writing a 
 If you haven't already, install the build tool with the pinned nightly toolchain:
 
 ```bash
-cargo +nightly-2026-04-03 install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
+cargo +nightly-2026-08-28 install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 
 Verify that your environment is set up correctly:
@@ -58,9 +58,9 @@ You should see `PASSED: all 1024 elements correct`. The generated template is a 
 Here's a vector addition with a twist: the element-wise addition is factored out into a plain helper function. Both the kernel and the helper live in the same file alongside host code:
 
 ```rust
-use cuda_device::{kernel, launch_bounds, launch_contract, thread, DisjointSlice};
-use cuda_host::cuda_module;
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig1D};
+use cuda_device::{DisjointSlice, kernel, launch_bounds, launch_contract, thread};
+use cuda_host::cuda_module;
 
 /// Plain helper function -- no annotation needed.
 /// The compiler discovers it automatically because `vecadd` calls it.
@@ -211,11 +211,11 @@ The `--async` flag generates a project with `tokio` and `cuda-async` dependencie
 Here's the generated async vecadd template (with minor formatting edits for readability):
 
 ```rust
-use cuda_device::{kernel, thread, DisjointSlice};
+use cuda_async::simt::device_context::init_device_contexts;
+use cuda_async::simt::device_operation::DeviceOperation;
+use cuda_core::simt::LaunchConfig;
+use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_module;
-use cuda_async::device_context::init_device_contexts;
-use cuda_async::device_operation::DeviceOperation;
-use cuda_core::LaunchConfig;
 
 #[cuda_module]
 mod kernels {
@@ -233,8 +233,8 @@ mod kernels {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use cuda_async::device_box::DeviceBox;
-    use cuda_core::memory::{malloc_async, memcpy_dtoh_async, memcpy_htod_async};
+    use cuda_async::simt::device_box::DeviceBox;
+    use cuda_core::simt::memory::{malloc_async, memcpy_dtoh_async, memcpy_htod_async};
     use std::mem;
 
     // 1. Initialize the device context map (default device 0, 1 device).
@@ -250,7 +250,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Allocate device memory and copy host data.
     let (a_dev, b_dev, mut c_dev) =
-        cuda_async::device_context::with_cuda_context(0, |ctx| {
+        cuda_async::simt::device_context::with_cuda_context(0, |ctx| {
             let stream = ctx.default_stream();
             let num_bytes = N * mem::size_of::<f32>();
             unsafe {
@@ -283,7 +283,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. Copy results back to host.
     let mut c_host = vec![0.0f32; N];
-    cuda_async::device_context::with_cuda_context(0, |ctx| {
+    cuda_async::simt::device_context::with_cuda_context(0, |ctx| {
         let stream = ctx.default_stream();
         unsafe {
             memcpy_dtoh_async(

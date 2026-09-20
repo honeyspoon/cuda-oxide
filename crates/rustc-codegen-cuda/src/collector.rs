@@ -97,7 +97,9 @@
 //! unsafe { cuda_launch! { kernel: reduce::<f32>, ... } }  // PTX generated here!
 //! ```
 //!
-//! Functions from `std` are FORBIDDEN because they require OS/threads/IO.
+//! Functions from `std` are FORBIDDEN because they require OS/threads/IO. The
+//! one exception is std's inherent float wrappers (`std::f32::<impl f32>::atan`
+//! and friends), which are collected; see `is_std_float_inherent_method`.
 //!
 //! ## MIR Access
 //!
@@ -127,12 +129,14 @@
 use mir_importer::is_panic_entry_path;
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use rustc_index::{Idx, bit_set::DenseBitSet};
-use rustc_middle::mir::mono::{CodegenUnit, MonoItem};
 use rustc_middle::mir::visit::Visitor;
 use rustc_middle::mir::{
     BasicBlock, ConstOperand, ConstValue, Location, START_BLOCK, TerminatorKind,
 };
-use rustc_middle::ty::{Instance, InstanceKind, Ty, TyCtxt, TyKind, TypeVisitableExt, TypingEnv};
+use rustc_middle::mono::{CodegenUnit, MonoItem};
+use rustc_middle::ty::{
+    Instance, InstanceKind, ShimKind, Ty, TyCtxt, TyKind, TypeVisitableExt, TypingEnv,
+};
 use rustc_span::Span;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -539,6 +543,32 @@ pub fn is_fully_monomorphized<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>)
     true
 }
 
+/// Fit a function path into the forbidden-crate diagnostic box.
+///
+/// The box pads this field with `{:<48}`, which counts characters, so the
+/// budget is a character budget. Two things follow, and the previous
+/// `if fn_path.len() > 48 { &fn_path[..45] }` got both wrong for a path that
+/// is not pure ASCII:
+///
+/// * `len()` is bytes. A 30-character path spelled with multi-byte characters
+///   can exceed 48 bytes and be truncated even though it would have fit.
+/// * `&fn_path[..45]` is a byte index. When byte 45 lands inside a multi-byte
+///   character it panics with "byte index 45 is not a char boundary" -- so
+///   emitting the diagnostic for a forbidden call would abort the compiler
+///   instead of printing the error the box exists to print. Rust identifiers
+///   may be non-ASCII, so a path can reach here in that shape.
+///
+/// Truncation keeps `width - 3` characters and appends an ellipsis, so the
+/// result never exceeds `width` characters.
+fn truncate_path_for_box(fn_path: &str, width: usize) -> String {
+    debug_assert!(width > 3, "the ellipsis needs room");
+    if fn_path.chars().count() <= width {
+        return fn_path.to_owned();
+    }
+    let kept: String = fn_path.chars().take(width - 3).collect();
+    format!("{kept}...")
+}
+
 /// `std::sys::cmath::*` names we allow in device code and rewrite to GPU math.
 ///
 /// When you call `x.tan()` (also `atan`, `acos`, `cbrt`, the hyperbolics,
@@ -584,6 +614,16 @@ fn is_intrinsic_lowered_cmath_shim(fn_path: &str) -> bool {
             | "std::sys::cmath::cosh"
             | "std::sys::cmath::tanhf"
             | "std::sys::cmath::tanh"
+            // Inverse hyperbolics: on this nightly (rustc e457a7b0d) only
+            // asinh/acosh are `std::sys::cmath` shims; atanh is still the
+            // pure-Rust `ln_1p` formula and cmath declares no atanh, so its
+            // entries are defensive, for when std makes the same move.
+            | "std::sys::cmath::asinhf"
+            | "std::sys::cmath::asinh"
+            | "std::sys::cmath::acoshf"
+            | "std::sys::cmath::acosh"
+            | "std::sys::cmath::atanhf"
+            | "std::sys::cmath::atanh"
             | "std::sys::cmath::expm1f"
             | "std::sys::cmath::expm1"
             | "std::sys::cmath::log1pf"
@@ -591,6 +631,71 @@ fn is_intrinsic_lowered_cmath_shim(fn_path: &str) -> bool {
             | "std::sys::cmath::hypotf"
             | "std::sys::cmath::hypot"
     )
+}
+
+/// `std`'s inherent float methods: `std::f32::<impl f32>::atan` and friends.
+///
+/// `x.atan()` resolves to a one-line `#[inline]` wrapper in `std` whose body
+/// bottoms out in a `core` intrinsic or a `std::sys::cmath` shim. Whether the
+/// kernel ever *calls* that wrapper depends on rustc's MIR inliner, which is
+/// off under `-C incremental` (every Cargo dev-profile build, `cargo oxide
+/// test`, `CARGO_INCREMENTAL=1`):
+///
+/// ```text
+/// build                          kernel MIR calls              std guard
+/// release, non-incremental       std::sys::cmath::atanf        whitelisted shim
+/// -C incremental / opt-level 0   std::f32::<impl f32>::atan    was: forbidden crate `std`
+/// ```
+///
+/// Nothing in these wrappers touches the OS or the heap, so collect them like
+/// any other reachable pure function. Every stable method's shim is in
+/// `is_intrinsic_lowered_cmath_shim`; the unstable `gamma`/`erf` family and
+/// `f128` still stop one level deeper, at their shim, with the guard naming
+/// that shim.
+fn is_std_float_inherent_method(fn_path: &str) -> bool {
+    ["f16", "f32", "f64", "f128"]
+        .iter()
+        .any(|ty| fn_path.starts_with(&format!("std::{ty}::<impl {ty}>::")))
+}
+
+/// True when `def_path` (rustc's definition path without the crate, as
+/// `DefPath::to_string_no_crate_verbose` prints it) names an item under core's
+/// `core_arch::<arch>` module for any `<arch>` other than `nvptx`.
+///
+/// ```text
+/// user wrote        core::arch::x86_64::_rdtsc
+/// defined at        ::core_arch::x86::rdtsc::_rdtsc
+/// inlines into      ::core_arch::x86::rdtsc::rdtsc      (foreign fn)   → true
+/// ::core_arch::nvptx::_syncthreads                      GPU's own module → false
+/// ::core_arch::simd::i32x4::new                         portable SIMD    → false
+/// ::hint::spin_loop                                     not core_arch    → false
+/// ```
+///
+/// - Kernel MIR comes from the host-target session, so the host CPU's
+///   `core::arch` module is fully visible to device code with no PTX lowering.
+/// - Most of its intrinsics carry `#[target_feature]` and are refused by that
+///   attribute first. This covers the ones without one (`_rdtsc`) and the
+///   private foreign declarations they inline into.
+/// - The definition path is used instead of `def_path_str`, whose re-export
+///   spelling varies (`std::arch::x86_64`, `core::arch::x86_64`).
+/// - Intrinsics that are pure `asm!` (`__cpuid`) leave no call to see; they
+///   still fail in the translator, as an unsupported `InlineAsm` terminator.
+fn is_host_cpu_arch_def_path(def_path: &str) -> bool {
+    let Some(rest) = def_path.strip_prefix("::core_arch::") else {
+        return false;
+    };
+    let Some((module, _item)) = rest.split_once("::") else {
+        return false;
+    };
+    !matches!(module, "nvptx" | "simd" | "macros")
+}
+
+/// True for the x86 intrinsic `core::hint::spin_loop` expands to on the host
+/// (`_mm_pause`, and the foreign `pause` it inlines into), so the guard can
+/// name what the user actually wrote.
+fn is_spin_loop_expansion(def_path: &str) -> bool {
+    is_host_cpu_arch_def_path(def_path)
+        && matches!(def_path.rsplit("::").next(), Some("pause" | "_mm_pause"))
 }
 
 /// Returns true for hidden `cuda_device::ptx_asm!` marker functions.
@@ -637,6 +742,8 @@ fn is_launch_metadata_marker_path(fn_path: &str) -> bool {
             | "cuda_device::thread::__launch_contract_config"
             | "cuda_device::__launch_contract_block_config"
             | "cuda_device::thread::__launch_contract_block_config"
+            | "cuda_device::__grid_constant_config"
+            | "cuda_device::thread::__grid_constant_config"
             | "cuda_device::__unchecked_indexing_config"
             | "cuda_device::thread::__unchecked_indexing_config"
     ) || fn_path.strip_prefix("cuda_device::").is_some_and(|path| {
@@ -646,6 +753,8 @@ fn is_launch_metadata_marker_path(fn_path: &str) -> bool {
             || path.starts_with("thread::__launch_contract_config::<")
             || path.starts_with("__launch_contract_block_config::<")
             || path.starts_with("thread::__launch_contract_block_config::<")
+            || path.starts_with("__grid_constant_config::<")
+            || path.starts_with("thread::__grid_constant_config::<")
             || path.starts_with("__unchecked_indexing_config::<")
             || path.starts_with("thread::__unchecked_indexing_config::<")
     })
@@ -723,9 +832,9 @@ fn const_str_text<'tcx>(tcx: TyCtxt<'tcx>, constant: &ConstOperand<'tcx>) -> Opt
 
 /// Extracts the stub function name out of a stub panic message.
 ///
-/// The message reads "internal error: entered unreachable code:
-/// thread::index_1d called outside #[kernel] / #[device] ...", so the
-/// stub name is the last word before " called outside".
+/// The message reads `internal error: entered unreachable code:
+/// thread::index_1d called outside #[kernel] / #[device] ...`, so the
+/// stub name is the last word before `" called outside"`.
 fn stub_name_from_marker_message(text: &str) -> &str {
     text.split(" called outside")
         .next()
@@ -794,6 +903,17 @@ struct DiscoveryCtx {
     root_is_kernel: bool,
     /// Nearest enclosing user-code span on the discovery path.
     user_span: Span,
+}
+
+impl DiscoveryCtx {
+    /// "kernel" or "device function", for diagnostics that name the root.
+    fn root_kind(&self) -> &'static str {
+        if self.root_is_kernel {
+            "kernel"
+        } else {
+            "device function"
+        }
+    }
 }
 
 /// Collects all device-reachable functions starting from kernel entry points.
@@ -1046,12 +1166,35 @@ impl<'tcx> DeviceCollector<'tcx> {
                     user_span: self.tcx.def_span(def_id),
                 });
 
+            // Host-CPU-only functions (`#[target_feature]`, `core::arch::<host>`)
+            // can reach device code because kernel MIR comes from the
+            // host-target session. Refuse them here, the one point every
+            // function with a body passes through (roots, callees, closures,
+            // fn items, trait-dispatched impls). Callees without a body are
+            // checked at the top of `process_call_operand`. Drop glue and
+            // the `FnPtr::addr` shim are the only compiler-built shims that
+            // reach this loop, and neither carries attributes; any other shim
+            // kind (a reified `#[target_feature]` fn, say) must be checked.
+            if !matches!(
+                func.instance.def,
+                InstanceKind::Shim(ShimKind::DropGlue(..) | ShimKind::FnPtrAsPtr(..))
+            ) {
+                self.check_host_cpu_only(def_id, ctx.user_span, &ctx, None);
+            }
+
             // Get MIR body if available. For drop glue shims
             // (InstanceKind::DropGlue), `is_mir_available` may return false
             // because the shim is compiler-generated, but `instance_mir`
             // still provides the body.
             let has_mir = self.tcx.is_mir_available(def_id)
-                || matches!(func.instance.def, InstanceKind::DropGlue(..));
+                || matches!(
+                    func.instance.def,
+                    // Compiler-built shims with no HIR body but an
+                    // `instance_mir` body: drop glue, and (since
+                    // nightly-2026-08-28) the `<fn(..) as FnPtr>::as_ptr`
+                    // shim that backs `FnPtr::addr`.
+                    InstanceKind::Shim(ShimKind::DropGlue(..) | ShimKind::FnPtrAsPtr(..))
+                );
             if has_mir {
                 // Use instance_mir for monomorphized MIR.
                 // This returns OPTIMIZED MIR (post -C opt-level passes).
@@ -1084,7 +1227,10 @@ impl<'tcx> DeviceCollector<'tcx> {
                 // paths (e.g. for assertion failures) that are unreachable
                 // in practice; the mir-importer handles these via its
                 // existing unreachable-block patching.
-                if !matches!(func.instance.def, InstanceKind::DropGlue(..)) {
+                if !matches!(
+                    func.instance.def,
+                    InstanceKind::Shim(ShimKind::DropGlue(..))
+                ) {
                     self.check_panic_machinery(mir, &func, &ctx, &reachable);
                 }
 
@@ -1225,17 +1371,17 @@ impl<'tcx> DeviceCollector<'tcx> {
         let place_ty = self.tcx.instantiate_and_normalize_erasing_regions(
             caller.instance.args,
             TypingEnv::fully_monomorphized(),
-            EarlyBinder::bind(place_ty),
+            EarlyBinder::bind(self.tcx, place_ty),
         );
 
         // Resolve drop_in_place::<T>. This returns the drop glue shim
         // (InstanceKind::DropGlue) which wraps the actual Drop::drop call.
-        let drop_instance = Instance::resolve_drop_in_place(self.tcx, place_ty);
+        let drop_instance = Instance::resolve_drop_glue(self.tcx, place_ty);
 
         // DropGlue(_, None) is an empty shim for types that need no
         // destructor. The mir-importer's no-op analysis will lower these
         // as plain branches, so there's nothing to collect.
-        if let InstanceKind::DropGlue(_, None) = drop_instance.def {
+        if let InstanceKind::Shim(ShimKind::DropGlue(_, None)) = drop_instance.def {
             return;
         }
 
@@ -1376,11 +1522,45 @@ impl<'tcx> DeviceCollector<'tcx> {
         //   Caller: cuda_oxide_kernel_<hash>_scale::<f32> (args = [f32])
         //   Call in MIR: scale<T>(...)  (args = [T])
         //   After substitution: scale::<f32> (args = [f32])
+        //
+        // `TyKind::FnDef` args sit behind a `Binder` since rust-lang/rust
+        // PR "place FnDef behind a binder" (8fb83aba335): the binder scopes
+        // the function's LATE-bound (lifetime) vars. By the time a FnDef
+        // type appears in built MIR those binders have been instantiated
+        // (with dummy regions), so no bound vars can remain here; the
+        // caller's still-generic EARLY-bound params (`T`) are not binder
+        // vars and are substituted by `instantiate_and_normalize` below.
+        // rustc_monomorphize::collector uses `args.no_bound_vars().unwrap()`
+        // at its equivalent Call-terminator sites; we follow it rather than
+        // `skip_binder()`, which would silently discard a bound var if one
+        // ever appeared.
+        let args = args
+            .no_bound_vars()
+            .expect("FnDef args in built MIR carry no late-bound vars");
         let args = self.tcx.instantiate_and_normalize_erasing_regions(
             caller.instance.args,
             TypingEnv::fully_monomorphized(),
-            EarlyBinder::bind(*args),
+            EarlyBinder::bind(self.tcx, args),
         );
+
+        // The call site is the best span while the caller is user code;
+        // afterwards keep the last user-code span recorded on the walk. Used
+        // for the host-CPU guard here and for every callee context below.
+        let user_span = if caller.instance.def_id().is_local() && !call_span.is_dummy() {
+            call_span
+        } else {
+            ctx.user_span
+        };
+
+        // Host-CPU guard, before any skip below can drop the callee silently.
+        // A body-less callee (the foreign `rdtsc` that `_rdtsc` inlines into)
+        // never reaches the worklist check, and the verbose trace shows it
+        // leaves this function through an early return before the "no MIR"
+        // skip, so this is the one place that sees it. The check is cheap
+        // when it does not fire: one cached attribute query and one crate
+        // compare. Name the caller only when it is not the root itself.
+        let via = (caller.export_name != ctx.root_name).then_some(caller.instance.def_id());
+        self.check_host_cpu_only(*def_id, user_span, ctx, via);
 
         // Check if function is from a crate we should compile
         match self.should_collect_from_crate(*def_id) {
@@ -1400,12 +1580,7 @@ impl<'tcx> DeviceCollector<'tcx> {
                 let border = "═".repeat(68);
                 let empty_line = format!("║{:68}║", "");
 
-                // Truncate fn_path if too long (max 48 chars to fit in box)
-                let fn_display = if fn_path.len() > 48 {
-                    format!("{}...", &fn_path[..45])
-                } else {
-                    fn_path.clone()
-                };
+                let fn_display = truncate_path_for_box(&fn_path, 48);
 
                 // Build the "From crate" line with proper padding
                 let crate_line = format!("║ From crate: '{}'", crate_name);
@@ -1454,11 +1629,7 @@ impl<'tcx> DeviceCollector<'tcx> {
         let callee_ctx = DiscoveryCtx {
             root_name: ctx.root_name.clone(),
             root_is_kernel: ctx.root_is_kernel,
-            user_span: if caller.instance.def_id().is_local() && !call_span.is_dummy() {
-                call_span
-            } else {
-                ctx.user_span
-            },
+            user_span,
         };
 
         // Callable-trait shims do not necessarily have a MIR body of their own.
@@ -1512,7 +1683,8 @@ impl<'tcx> DeviceCollector<'tcx> {
         // bodies (e.g. for array/slice element drops) are collected.
         if !matches!(
             resolved.def,
-            InstanceKind::Item(_) | InstanceKind::DropGlue(..)
+            InstanceKind::Item(_)
+                | InstanceKind::Shim(ShimKind::DropGlue(..) | ShimKind::FnPtrAsPtr(..))
         ) {
             return;
         }
@@ -1520,7 +1692,7 @@ impl<'tcx> DeviceCollector<'tcx> {
         // For DropGlue instances discovered via Call terminators (rather
         // than Drop terminators), route them through the same collection
         // logic as process_drop_place to avoid duplicating the enqueue path.
-        if let InstanceKind::DropGlue(_, Some(_)) = resolved.def {
+        if let InstanceKind::Shim(ShimKind::DropGlue(_, Some(_))) = resolved.def {
             let mangled = self.tcx.symbol_name(resolved).name.to_string();
             if self.seen.contains(&mangled) {
                 return;
@@ -1536,11 +1708,7 @@ impl<'tcx> DeviceCollector<'tcx> {
             let callee_ctx = DiscoveryCtx {
                 root_name: ctx.root_name.clone(),
                 root_is_kernel: ctx.root_is_kernel,
-                user_span: if caller.instance.def_id().is_local() && !call_span.is_dummy() {
-                    call_span
-                } else {
-                    ctx.user_span
-                },
+                user_span,
             };
             let export_name = sanitize_ptx_name(&mangled);
             if self.verbose {
@@ -1561,7 +1729,7 @@ impl<'tcx> DeviceCollector<'tcx> {
         }
 
         // Empty drop glue (DropGlue with None type) has no body to collect.
-        if let InstanceKind::DropGlue(_, None) = resolved.def {
+        if let InstanceKind::Shim(ShimKind::DropGlue(_, None)) = resolved.def {
             return;
         }
 
@@ -1628,7 +1796,13 @@ impl<'tcx> DeviceCollector<'tcx> {
         // Skip functions without MIR bodies (extern intrinsics like cuda_device::threadIdx_x).
         // These are handled specially by the terminator translator in mir-importer
         // which dispatches them to NVVM intrinsic operations.
-        if !self.tcx.is_mir_available(resolved.def_id()) {
+        //
+        // Compiler-built shims (`FnPtrAsPtr`) have no HIR body either, so
+        // `is_mir_available` is false for their def_id, but `instance_mir`
+        // synthesises their body; do not skip those.
+        if !self.tcx.is_mir_available(resolved.def_id())
+            && !matches!(resolved.def, InstanceKind::Shim(ShimKind::FnPtrAsPtr(..)))
+        {
             if self.verbose {
                 eprintln!(
                     "[collector] Skipping extern/intrinsic (no MIR): {}",
@@ -1696,6 +1870,14 @@ impl<'tcx> DeviceCollector<'tcx> {
                 ("closure", instance)
             }
             TyKind::FnDef(fn_def_id, fn_args) => {
+                // This ty comes from fully-monomorphized MIR, so the FnDef
+                // binder (late-bound lifetimes only) has been instantiated;
+                // assert that instead of `skip_binder()`, matching
+                // rustc_monomorphize::collector's
+                // `args.no_bound_vars().unwrap()` discipline.
+                let fn_args = fn_args
+                    .no_bound_vars()
+                    .expect("FnDef args in monomorphized MIR carry no late-bound vars");
                 let Some(instance) =
                     Instance::try_resolve(self.tcx, typing_env, *fn_def_id, fn_args)
                         .ok()
@@ -1830,7 +2012,9 @@ impl<'tcx> DeviceCollector<'tcx> {
     ///
     /// ## Forbidden (Error)
     ///
-    /// - `std`: OS, I/O, threads - can't run on GPU
+    /// - `std`: OS, I/O, threads - can't run on GPU. Two exceptions: the
+    ///   inherent float wrappers (`std::f32::<impl f32>::*`, collected) and
+    ///   the `std::sys::cmath` shims (skipped, lowered to libdevice).
     fn should_collect_from_crate(&self, def_id: DefId) -> CollectDecision {
         // Always collect from local crate
         if def_id.krate == LOCAL_CRATE {
@@ -1867,14 +2051,21 @@ impl<'tcx> DeviceCollector<'tcx> {
         // Forbidden crate: std (OS, I/O, threads) - absolutely can't run on GPU
         if name_str == "std" {
             let fn_path = self.tcx.def_path_str(def_id);
+            // The `#[inline]` float wrappers (`f32::atan`, `f64::sinh`, ...)
+            // are pure and bottom out in a `core` intrinsic or a cmath shim.
+            // They only reach the guard when the MIR inliner is off, so
+            // collect them as ordinary device functions.
+            if is_std_float_inherent_method(&fn_path) {
+                return CollectDecision::Collect;
+            }
             // A handful of `std::sys::cmath::*` libm shims are intercepted
             // by mir-importer's float-math intrinsic dispatch and lowered
             // directly to libdevice (`__nv_atan2f` etc.). They never enter
             // device codegen, so silently skip them here instead of tripping
             // the std-crate guard. This is what makes `f32::atan2`,
-            // `f32::atan`, and the f64 counterparts usable from device code
-            // (MIR-opt inlines the `#[inline]` `std` wrapper, leaving a
-            // direct call to the cmath shim at the kernel call site).
+            // `f32::atan`, and the f64 counterparts usable from device code,
+            // whether the kernel calls the shim directly (MIR-opt inlined the
+            // wrapper) or through the collected wrapper above.
             if is_intrinsic_lowered_cmath_shim(&fn_path) {
                 return CollectDecision::SkipIntentional;
             }
@@ -1939,7 +2130,7 @@ impl<'tcx> DeviceCollector<'tcx> {
 
     /// Computes the export name for a function.
     ///
-    /// `name` must be the FQDN (from [`fqdn()`]) so that non-generic export names
+    /// `name` must be the FQDN (from [`Self::fqdn`]) so that non-generic export names
     /// match what `CrateDef::name()` returns on the call side. Both sides feed
     /// the FQDN through pliron's `Legaliser`, which replaces every
     /// non-`[A-Za-z0-9]` character with `_`. We return the *raw* FQDN here so
@@ -2096,11 +2287,7 @@ impl<'tcx> DeviceCollector<'tcx> {
         ctx: &DiscoveryCtx,
     ) -> ! {
         let caller_path = self.tcx.def_path_str(caller.instance.def_id());
-        let root_kind = if ctx.root_is_kernel {
-            "kernel"
-        } else {
-            "device function"
-        };
+        let root_kind = ctx.root_kind();
         self.tcx
             .dcx()
             .struct_span_fatal(
@@ -2124,10 +2311,146 @@ impl<'tcx> DeviceCollector<'tcx> {
             .emit()
     }
 
+    /// Refuses a device-reachable function that only makes sense on the host
+    /// CPU, at the user-code site that reached it.
+    ///
+    /// ```text
+    /// #[kernel] fn k(..) ─► helper ─► _mm256_add_ps   #[target_feature(enable = "avx2")]  signal 1
+    ///                    ─► _rdtsc ─► rdtsc (foreign) ::core_arch::x86::rdtsc::rdtsc      signal 2
+    /// ```
+    ///
+    /// - Kernel MIR comes from the host-target session, so rustc has already
+    ///   accepted these for the host. None has a PTX lowering; without this
+    ///   guard they fail deep in the translator, or lower to something the
+    ///   author did not mean.
+    /// - Signal 1: `#[target_feature]` on the definition. The MIR inliner never
+    ///   inlines a callee whose feature set differs from the caller's, so the
+    ///   call survives to here as a call.
+    /// - Signal 2: a definition under core's `core_arch::<arch>` for a
+    ///   non-`nvptx` arch, see [`is_host_cpu_arch_def_path`]. Checked only for
+    ///   items in `core`, after the cached attribute query, so the common case
+    ///   costs one query and one crate compare.
+    /// - Called from the worklist pop (every function with a body, including
+    ///   trait-dispatched impls and closures) and at the top of
+    ///   `process_call_operand` (every call edge, before any skip), which is
+    ///   the only place that sees body-less callees such as inlined foreign
+    ///   declarations.
+    ///
+    /// `via` is the collected function whose body contains the call, when it
+    /// is not the root itself.
+    fn check_host_cpu_only(
+        &self,
+        def_id: DefId,
+        span: Span,
+        ctx: &DiscoveryCtx,
+        via: Option<DefId>,
+    ) {
+        use rustc_middle::middle::codegen_fn_attrs::TargetFeatureKind;
+
+        // Report the features the author wrote (`avx2`), not the ones rustc
+        // derives from them (`avx`, `sse4.2`, ...). `Forced` is the unsafe
+        // `force_target_feature` spelling and is just as host-only.
+        //
+        // Closures are exempt: rustc copies the enclosing function's features
+        // onto them so their bodies may call its intrinsics, but the closure
+        // itself is ordinary code. A portable closure launched from an avx2
+        // host function must keep compiling; anything host-only inside its
+        // body is caught when that body is walked.
+        let features: Vec<String> = if self.tcx.is_closure_like(def_id) {
+            Vec::new()
+        } else {
+            self.tcx
+                .codegen_fn_attrs(def_id)
+                .target_features
+                .iter()
+                .filter(|f| {
+                    matches!(
+                        f.kind,
+                        TargetFeatureKind::Enabled | TargetFeatureKind::Forced
+                    )
+                })
+                .map(|f| f.name.to_string())
+                .collect()
+        };
+
+        let in_core = self.tcx.crate_name(def_id.krate).as_str() == "core";
+        let def_path = in_core.then(|| self.tcx.def_path(def_id).to_string_no_crate_verbose());
+        let is_arch_intrinsic = def_path.as_deref().is_some_and(is_host_cpu_arch_def_path);
+
+        if features.is_empty() && !is_arch_intrinsic {
+            return;
+        }
+
+        let fn_path = self.tcx.def_path_str(def_id);
+        let message = if !features.is_empty() {
+            format!(
+                "`{fn_path}` requires host CPU target features (`{}`) and cannot run on the GPU",
+                features.join("`, `")
+            )
+        } else {
+            format!(
+                "`{fn_path}` is a `core::arch` intrinsic for the host CPU (`{}`) and cannot run on the GPU",
+                self.tcx.sess.target.arch
+            )
+        };
+
+        let root_kind = ctx.root_kind();
+        let reach = match via {
+            Some(caller) => format!(
+                "device code starting at {root_kind} `{}` reaches it through `{}`",
+                ctx.root_name,
+                self.tcx.def_path_str(caller)
+            ),
+            None => format!(
+                "device code starting at {root_kind} `{}` reaches it",
+                ctx.root_name
+            ),
+        };
+
+        let mut diag = self
+            .tcx
+            .dcx()
+            .struct_span_fatal(span, message)
+            .with_note(reach)
+            .with_note(
+                "cuda-oxide compiles kernels from the host target's MIR, so code selected by \
+                 `cfg(target_arch = ...)`, `core::arch` intrinsics, and `#[target_feature]` \
+                 functions for the host CPU are visible to device code; none of them has a \
+                 PTX lowering",
+            );
+        // Portable code can land here without the user writing anything
+        // host-specific: `core::hint::spin_loop` expands to `_mm_pause` on
+        // x86, `<[u8]>::is_ascii` picks an SSE2 path, `half` picks its f16c
+        // path under `-C target-cpu=native`. Say so, instead of telling the
+        // user to remove host-CPU code they never wrote.
+        if is_spin_loop_expansion(def_path.as_deref().unwrap_or("")) {
+            diag = diag.with_note(
+                "this is what `core::hint::spin_loop` expands to on the host; it has no GPU \
+                 lowering yet, so wait with `cuda_device::barrier::nanosleep` or a plain loop \
+                 instead",
+            );
+        } else if !def_id.is_local() && via.is_some_and(|caller| !caller.is_local()) {
+            // Reached through a non-local function, so the user did not call
+            // it directly: a dependency or `core` picked the host path.
+            diag = diag.with_note(format!(
+                "the host build selected this code inside crate `{}` through `cfg(target_arch)` \
+                 / `cfg(target_feature)` (widened by `-C target-cpu=native` if set); the portable \
+                 alternative cannot be re-selected from device code",
+                self.tcx.crate_name(def_id.krate)
+            ));
+        }
+        diag.with_help(
+            "keep host-CPU code out of `#[kernel]` and `#[device]` functions and the \
+             helpers they call; when it came from `core` or a dependency, use a `cuda_device` \
+             equivalent or a plain loop instead",
+        )
+        .emit()
+    }
+
     /// Diagnoses a callee whose entire body is panic machinery (issue #76).
     ///
     /// Reached from the `is_unreachable_body` skip in
-    /// [`process_call_operand`]. Genuine intrinsic placeholders (the
+    /// [`Self::process_call_operand`]. Genuine intrinsic placeholders (the
     /// `cuda_device` stubs the translator rewrites by name) must keep
     /// being skipped silently, so this only reports two specific cases:
     ///
@@ -2169,11 +2492,7 @@ impl<'tcx> DeviceCollector<'tcx> {
         let caller_path = self.tcx.def_path_str(caller.instance.def_id());
         let callee_path = self.tcx.def_path_str(def_id);
         let user_call_span = call_span;
-        let root_kind = if ctx.root_is_kernel {
-            "kernel"
-        } else {
-            "device function"
-        };
+        let root_kind = ctx.root_kind();
 
         if let Some((_, _, text)) = marker {
             let stub = stub_name_from_marker_message(text);
@@ -2266,7 +2585,7 @@ impl<'tcx> DeviceCollector<'tcx> {
     /// Diagnoses a missing `#[device]` annotation found through the panic
     /// machinery of a collected body (issue #76).
     ///
-    /// Called from [`collect`] for every function that is about to be
+    /// Called from [`Self::collect`] for every function that is about to be
     /// translated. A basic block ending in a call into `core::panicking`
     /// is a panic path; the string constants it materializes are the panic
     /// message (or the pieces of a `format_args!` template).
@@ -2340,11 +2659,7 @@ impl<'tcx> DeviceCollector<'tcx> {
             };
 
             let func_path = self.tcx.def_path_str(func.instance.def_id());
-            let root_kind = if ctx.root_is_kernel {
-                "kernel"
-            } else {
-                "device function"
-            };
+            let root_kind = ctx.root_kind();
             // When the panic sits directly in the root's body, naming the
             // (mangled) containing function adds nothing; name the root once.
             let location_note = if func.export_name == ctx.root_name {
@@ -2433,14 +2748,78 @@ pub fn dump_device_mir_info<'tcx>(tcx: TyCtxt<'tcx>, functions: &[CollectedFunct
 #[cfg(test)]
 mod tests {
     use super::{
-        device_runtime_checks_target, is_kernel_entry_def_path, unsupported_codegen_protocol_root,
+        device_runtime_checks_target, is_host_cpu_arch_def_path, is_kernel_entry_def_path,
+        is_spin_loop_expansion, is_std_float_inherent_method, truncate_path_for_box,
+        unsupported_codegen_protocol_root,
     };
     use reserved_oxide_symbols::{
         DEVICE_PREFIX, KERNEL_PREFIX, LEGACY_DEVICE_PREFIX, LEGACY_KERNEL_PREFIX,
         PTX_MERGE_REQUIRED_PREFIX, is_ptx_merge_required_marker, ptx_merge_required_marker,
     };
-    use rustc_index::Idx;
     use rustc_middle::mir::BasicBlock;
+
+    #[test]
+    fn std_float_wrappers_are_collected_not_forbidden() {
+        for ty in ["f16", "f32", "f64", "f128"] {
+            assert!(is_std_float_inherent_method(&format!(
+                "std::{ty}::<impl {ty}>::atan"
+            )));
+        }
+        assert!(is_std_float_inherent_method("std::f64::<impl f64>::atan2"));
+        assert!(is_std_float_inherent_method(
+            "std::f32::<impl f32>::sin_cos"
+        ));
+        // The shim a wrapper calls is skipped rather than collected, core's
+        // float methods never reach the std guard, and the rest of std stays
+        // forbidden.
+        assert!(!is_std_float_inherent_method("std::sys::cmath::atanf"));
+        assert!(!is_std_float_inherent_method("core::f32::<impl f32>::abs"));
+        assert!(!is_std_float_inherent_method("std::f32::consts::PI"));
+        assert!(!is_std_float_inherent_method("std::io::stdio::_print"));
+    }
+
+    #[test]
+    fn host_cpu_arch_definition_paths_are_recognised() {
+        // Definition paths as `DefPath::to_string_no_crate_verbose` prints
+        // them: what `_rdtsc` inlines into, an AVX intrinsic, a NEON one.
+        assert!(is_host_cpu_arch_def_path("::core_arch::x86::rdtsc::rdtsc"));
+        assert!(is_host_cpu_arch_def_path(
+            "::core_arch::x86::avx::_mm256_add_ps"
+        ));
+        assert!(is_host_cpu_arch_def_path(
+            "::core_arch::aarch64::neon::generated::vaddq_f32"
+        ));
+        assert!(is_host_cpu_arch_def_path(
+            "::core_arch::riscv_shared::pause"
+        ));
+    }
+
+    #[test]
+    fn gpu_and_non_arch_definition_paths_are_not_host_cpu_intrinsics() {
+        // The GPU's own module, never visible under a host target today but
+        // the right answer if it ever is.
+        assert!(!is_host_cpu_arch_def_path(
+            "::core_arch::nvptx::_syncthreads"
+        ));
+        // stdarch's private SIMD vector types and macro helpers under core_arch.
+        assert!(!is_host_cpu_arch_def_path("::core_arch::simd::i32x4::new"));
+        assert!(!is_host_cpu_arch_def_path("::core_arch::macros::foo"));
+        // Items outside core_arch, including `core::arch::breakpoint`, which
+        // lives in core's `arch` module, not in `core_arch`.
+        assert!(!is_host_cpu_arch_def_path("::arch::breakpoint"));
+        assert!(!is_host_cpu_arch_def_path("::hint::spin_loop"));
+        assert!(!is_host_cpu_arch_def_path("::ptr::read"));
+        // Re-export spellings are never passed in; only definition paths are.
+        assert!(!is_host_cpu_arch_def_path("core::arch::x86_64::_rdtsc"));
+    }
+
+    #[test]
+    fn spin_loop_expansions_get_the_extra_note() {
+        assert!(is_spin_loop_expansion("::core_arch::x86::sse2::pause"));
+        assert!(is_spin_loop_expansion("::core_arch::x86::sse2::_mm_pause"));
+        assert!(!is_spin_loop_expansion("::core_arch::x86::rdtsc::rdtsc"));
+        assert!(!is_spin_loop_expansion("::hint::spin_loop"));
+    }
 
     #[test]
     fn ptx_merge_marker_matches_only_the_final_path_component() {
@@ -2554,5 +2933,52 @@ mod tests {
             "my_crate::helpers::prefix{KERNEL_PREFIX}vecadd"
         )));
         assert!(!is_kernel_entry_def_path(""));
+    }
+
+    /// The box pads this field with `{:<48}`, so the budget is characters.
+    ///
+    /// The previous code tested `fn_path.len() > 48` (bytes) and then sliced
+    /// `&fn_path[..45]` (a byte index). A path whose byte 45 falls inside a
+    /// multi-byte character panicked with "byte index 45 is not a char
+    /// boundary", which aborted the compiler while it was trying to print the
+    /// forbidden-crate error.
+    #[test]
+    fn truncating_a_path_for_the_box_respects_char_boundaries() {
+        // 'é' is two bytes, so every char boundary sits at an even index and
+        // byte 45 lands mid-character.
+        let path = "é".repeat(60);
+        assert!(path.chars().count() > 48, "fixture must exceed the budget");
+        assert!(!path.is_char_boundary(45), "fixture must straddle byte 45");
+
+        let shown = truncate_path_for_box(&path, 48);
+
+        assert!(shown.ends_with("..."));
+        assert_eq!(shown.chars().count(), 48);
+        assert!(path.starts_with(shown.trim_end_matches('.')));
+    }
+
+    #[test]
+    fn a_path_that_fits_is_left_alone() {
+        let path = "core::fmt::Debug::fmt";
+        assert_eq!(truncate_path_for_box(path, 48), path);
+    }
+
+    /// Bytes are not characters: a path of 30 characters spelled with
+    /// multi-byte characters exceeds 48 bytes, and the old byte test truncated
+    /// it even though it fits the box.
+    #[test]
+    fn a_multibyte_path_within_the_char_budget_is_not_truncated() {
+        let path = "é".repeat(30);
+        assert!(path.len() > 48, "fixture must exceed the byte budget");
+        assert_eq!(path.chars().count(), 30);
+        assert_eq!(truncate_path_for_box(&path, 48), path);
+    }
+
+    #[test]
+    fn truncation_never_exceeds_the_width() {
+        for count in [49, 60, 200] {
+            let ascii = "a".repeat(count);
+            assert_eq!(truncate_path_for_box(&ascii, 48).chars().count(), 48);
+        }
     }
 }

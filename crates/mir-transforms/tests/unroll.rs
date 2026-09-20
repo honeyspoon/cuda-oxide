@@ -21,14 +21,16 @@ use dialect_mir::ops::{
     MirBitAndOp, MirCallOp, MirCondBranchOp, MirConstantOp, MirGeOp, MirReturnOp, MirUnrollHintOp,
 };
 use mir_transforms::unroll::unroll_annotated_loops;
+use pliron::attribute::Attribute;
 use pliron::builtin::attributes::{IntegerAttr, StringAttr};
 use pliron::builtin::ops::ConstantOp;
+use pliron::builtin::types::FunctionType;
 use pliron::context::{Context, Ptr};
 use pliron::graph::{ControlFlowGraph, dominance::DomInfo};
 use pliron::linked_list::ContainsLinkedList;
 use pliron::op::Op;
 use pliron::operation::Operation;
-use pliron::pass_manager::AnalysisManager;
+use pliron::pass::AnalysisManager;
 use pliron::region::Region;
 
 use mir_transforms::analyses::loop_info::LoopInfo;
@@ -77,8 +79,8 @@ fn constant_i128(ctx: &Context, value: pliron::value::Value) -> Option<i128> {
     if let Some(c) = Operation::get_op::<MirConstantOp>(def, ctx) {
         return c.get_attr_value(ctx).map(|a| a.value().to_i128());
     }
-    Operation::get_op::<ConstantOp>(def, ctx)?
-        .get_value(ctx)
+    let attr = Operation::get_op::<ConstantOp>(def, ctx)?.get_value(ctx);
+    (&*attr as &dyn Attribute)
         .downcast_ref::<IntegerAttr>()
         .map(|a| a.value().to_i128())
 }
@@ -509,8 +511,11 @@ fn side_effecting_loop_header_is_skipped() {
         vec![],
         0,
     );
-    MirCallOp::new(side_effect).set_attr_callee(&ctx, StringAttr::new("header_effect".into()));
-    side_effect.insert_before(&ctx, header_term);
+    let side_effect = MirCallOp::new(side_effect);
+    side_effect.set_attr_callee(&ctx, StringAttr::new("header_effect".into()));
+    let signature = FunctionType::get(&ctx, vec![], vec![]);
+    side_effect.set_external_callee_signature(&mut ctx, signature.into());
+    side_effect.get_operation().insert_before(&ctx, header_term);
 
     MirUnrollHintOp::new(&mut ctx, 0)
         .get_operation()

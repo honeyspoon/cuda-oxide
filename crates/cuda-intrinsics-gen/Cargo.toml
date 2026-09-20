@@ -7,10 +7,13 @@ license.workspace = true
 repository.workspace = true
 publish = false
 description = "Extractor and deterministic source generator for cuda-oxide intrinsics"
+readme = "README.md"
 
 [dependencies]
 anyhow = { workspace = true }
+cuda-target-spec = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 toml = { workspace = true }
+ptx-parse = { workspace = true }

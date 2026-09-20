@@ -24,7 +24,8 @@
 //!
 //! Once array index writes are implemented, all tests should pass.
 
-use cuda_core::{CudaContext, CudaStream, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, CudaStream, DeviceBuffer};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_module;
 use std::sync::Arc;
@@ -311,9 +312,7 @@ fn main() {
     let ctx = CudaContext::new(0).expect("Failed to create CUDA context");
     println!("Device ordinal: {}\n", ctx.ordinal());
 
-    let ptx_path = concat!(env!("CARGO_MANIFEST_DIR"), "/array_index.ptx");
-
-    let module = match ctx.load_module_from_file(ptx_path) {
+    let module = match kernels::load(&ctx) {
         Ok(m) => m,
         Err(e) => {
             println!("Failed to load PTX: {}", e);
@@ -325,7 +324,6 @@ fn main() {
             return;
         }
     };
-    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
 
     let stream = ctx.default_stream();
 

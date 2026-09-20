@@ -35,12 +35,14 @@
 //! Build and run with:
 //!   cargo oxide run async_mlp
 
-use cuda_async::device_box::DeviceBox;
-use cuda_async::device_context::init_device_contexts;
-use cuda_async::device_operation::{self, DeviceOperation, Zippable, value};
+use cuda_async::simt::device_box::DeviceBox;
+use cuda_async::simt::device_context::init_device_contexts;
+use cuda_async::simt::device_operation::{self, DeviceOperation, Zippable, value};
 use cuda_async::zip;
-use cuda_core::LaunchConfig;
-use cuda_core::memory::{malloc_async, memcpy_dtoh_async, memcpy_htod_async, memset_d8_async};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::simt::memory::{
+    malloc_async, memcpy_dtoh_async, memcpy_htod_async, memset_d8_async,
+};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_module;
 use std::future::IntoFuture;
@@ -71,7 +73,8 @@ mod kernels {
         let row = thread::index_2d_row();
         let col = thread::index_2d_col();
 
-        if let Some(c_idx) = unsafe { thread::index_2d_runtime(n as usize) } {
+        // The row width comes from `c`, bound on the host to this same `n`.
+        if let Some(c_idx) = thread::index_2d_runtime(&c) {
             // col < n guaranteed by index_2d_runtime returning Some
             if row < m as usize {
                 let n_sz = n as usize;
@@ -268,13 +271,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // indexing, and all matrices are DIM x DIM allocations.
                     let launch = unsafe {
                         module.sgemm_naive_async_owned(
-                            gemm_cfg, DIM as u32, DIM as u32, DIM as u32, 1.0f32, input, w0,
-                            0.0f32, hidden,
+                            gemm_cfg,
+                            DIM as u32,
+                            DIM as u32,
+                            DIM as u32,
+                            1.0f32,
+                            input,
+                            w0,
+                            0.0f32,
+                            // C's row width, bound to the buffer for this launch.
+                            cuda_host::RowWidthOwned::new(hidden, DIM as u32),
                         )
                     }
                     .expect("Failed to build sgemm_naive launch");
-                    launch
-                        .and_then(move |(_input, _w0, hidden)| value((hidden, output, w1, module)))
+                    launch.and_then(move |(_input, _w0, hidden)| {
+                        value((hidden.into_buffer(), output, w1, module))
+                    })
                 },
             )
             // ── Stage 2: MatVec  output = hidden @ W1 ───────────────────

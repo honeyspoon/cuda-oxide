@@ -22,7 +22,8 @@
 //!
 //! Run: cargo oxide run ref_operand_mul
 
-use cuda_core::{CudaContext, CudaStream, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, CudaStream, DeviceBuffer};
 use cuda_host::cuda_module;
 use std::sync::Arc;
 
@@ -82,12 +83,7 @@ fn main() {
     let ctx = CudaContext::new(0).expect("Failed to create CUDA context");
     println!("Device ordinal: {}\n", ctx.ordinal());
 
-    let ptx_path = concat!(env!("CARGO_MANIFEST_DIR"), "/ref_operand_mul.ptx");
-    let module = ctx
-        .load_module_from_file(ptx_path)
-        .expect("Failed to load PTX (run `cargo oxide run ref_operand_mul`)");
-    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
-
+    let module = kernels::load(&ctx).expect("Failed to load embedded CUDA module");
     let stream = ctx.default_stream();
     let ok = run_ref_pieces_mul(&module, &stream);
 

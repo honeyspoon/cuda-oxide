@@ -11,7 +11,8 @@
 //! Build and run with:
 //!   cargo oxide run hello_constant
 
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, DeviceBuffer};
 use cuda_device::kernel;
 use cuda_host::cuda_module;
 
@@ -43,11 +44,7 @@ fn main() {
 
     let out_dev = DeviceBuffer::<i32>::zeroed(&stream, 1).expect("Failed to allocate");
 
-    let module = ctx
-        .load_module_from_file("hello_constant.ptx")
-        .expect("Failed to load PTX module");
-    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
-
+    let module = kernels::load(&ctx).expect("Failed to load embedded CUDA module");
     println!("Launching kernel...");
     unsafe {
         module.hello_constant(

@@ -81,9 +81,9 @@ The conversion functions are organized into modules by category:
 | Category      | Module                        | What It Handles                                                                  |
 | :------------ | :---------------------------- | :--------------------------------------------------------------------------------|
 | Arithmetic    | `convert/ops/arithmetic.rs`   | `add`→`add`, `sub`→`sub`, `checked_add`→`add`+`extractvalue`                     |
-| Memory        | `convert/ops/memory.rs`       | `mir.load`→`load`, `mir.store`→`store`, `shared_alloc`→global + `addrspacecast`  |
+| Memory        | `convert/ops/memory/*.rs`     | `mir.load`→`load`, `mir.store`→`store`, `shared_alloc`→global + `addrspacecast`  |
 | Control Flow  | `convert/ops/control_flow.rs` | `mir.goto`→`br`, `mir.cond_br`→`cond_br`, `mir.return`→`return`                  |
-| Aggregate     | `convert/ops/aggregate.rs`    | Struct/tuple field access → GEP or `extractvalue`/`insertvalue`                  |
+| Aggregate     | `convert/ops/aggregate/*.rs`  | Struct/tuple field access → GEP or `extractvalue`/`insertvalue`                  |
 | Cast          | `convert/ops/cast.rs`         | `IntToInt`→`zext`/`sext`/`trunc`, `FloatToFloat`→`fpext`/`fptrunc`, etc.         |
 | Call          | `convert/ops/call.rs`         | `mir.call`→`call`, with argument flattening and `::` to `__` name conversion     |
 | GPU Intrinsic | `convert/intrinsics/*.rs`     | NVVM ops → LLVM intrinsic calls or inline PTX                                    |
@@ -427,9 +427,28 @@ out = DisjointSlice {ptr: 0x..., len: 1}
 
 Pliron `mem2reg` still has a promotion-aware salvage path: when it promotes a
 debug-tagged slot it emits a `mir.dbg_value` ("this source variable has this SSA
-value here") that lowers to `llvm.dbg.value`. That is the groundwork for a
-future *optimized* debug tier; the current `full` tier does not run `mem2reg`,
-so it relies on `dbg.declare` instead.
+value here") that lowers to `llvm.dbg.value`. The current `full` tier does not
+run `mem2reg`, so place-backed locals normally rely on `dbg.declare`.
+
+`ReferencePropagation` can replace a pointer assignment with an internal
+`AssignRef` event:
+
+```text
+ptr = &slice[i] -> AssignRef(ptr, slice[i])
+```
+
+Full mode carries that event across stable MIR. For the supported
+borrowed-slice index form, it writes the address into the variable's debugger
+stack slot at the same program point:
+
+```text
+AssignRef -> address of slice[i] -> ptr's debugger slot
+```
+
+The importer validates the complete event set first. Invalid or unsupported
+events omit that destination before translation, so no partial instrumentation
+is emitted. Default, line-table, and release builds are unchanged. Promotion
+salvage remains groundwork for a future *optimized* debug tier.
 
 ### Variable scopes and inlining
 
@@ -548,13 +567,14 @@ that cuda-oxide emits.
 | :------- | :-------------------------------------------------------- | :-------------------------------------------------------------------- |
 | 1st      | `$CUDA_OXIDE_LLC` (if set)                                | Caller-supplied override; whatever binary you point it at.            |
 | 2nd      | Rust toolchain's `llvm-tools` llc                         | `<sysroot>/lib/rustlib/<host>/bin/llc` (auto-installed via `rustup`). |
-| 3rd      | `llc-22` on `PATH`                                        | Distro / `apt.llvm.org` install of LLVM 22.                           |
-| 4th      | `llc-21` on `PATH`                                        | Distro / `apt.llvm.org` install of LLVM 21.                           |
-| 5th      | `llc` on `PATH`                                           | Reporting fallback only; rejected at runtime if older than LLVM 21.   |
+| 3rd      | `llc-23` on `PATH`                                        | Distro / `apt.llvm.org` install of LLVM 23.                           |
+| 4th      | `llc-22` on `PATH`                                        | Distro / `apt.llvm.org` install of LLVM 22.                           |
+| 5th      | `llc-21` on `PATH`                                        | Distro / `apt.llvm.org` install of LLVM 21.                           |
+| 6th      | `llc` on `PATH`                                           | Reporting fallback only; rejected at runtime if older than LLVM 21.   |
 
-The pinned Rust toolchain (`nightly-2026-04-03`) ships LLVM 22 with NVPTX
+The pinned Rust toolchain (`nightly-2026-08-28`) ships LLVM 23 with NVPTX
 enabled, so `rustup component add llvm-tools` is the recommended onboarding
-path. The PATH probes for `llc-22` / `llc-21` are kept as a fallback for
+path. The PATH probes for `llc-23` / `llc-22` / `llc-21` are kept as a fallback for
 users with an existing LLVM install. If none of the probes succeed the
 pipeline fails with a clear error. You can opt into a specific (possibly
 older) binary by setting `CUDA_OXIDE_LLC=/path/to/llc`, but simple kernels
@@ -593,6 +613,52 @@ and a `cta_group` parameter in LLVM 21. Older `llc` versions reject it with
 intrinsic emitters per LLVM version, we set 21 as the minimum.
 ```
 
+### Picking `opt` to match
+
+`llc` is not the only LLVM binary the pipeline runs: the middle-end
+optimization stage needs `opt`, and the two must come from the **same LLVM
+major**. Mixing them is the failure this ordering exists to prevent -- `opt`
+from one release can emit IR that `llc` from another does not accept.
+
+So `llc` is resolved first, by the table above, and its major is read from
+`llc --version`. `opt` is then chosen to match:
+
+| Priority | Source                                             | Notes                                                                 |
+| :------- | :------------------------------------------------- | :-------------------------------------------------------------------- |
+| 1st      | `$CUDA_OXIDE_OPT` (if set)                         | Always respected. A major mismatch against the chosen `llc` is not silently corrected -- it records a diagnostic naming both binaries. |
+| 2nd      | The `opt` beside the chosen `llc`                  | LLVM installs keep their tools side by side. Still version-checked: a mismatched sibling is rejected, and it is only accepted unverified when `llc`'s own version cannot be read. |
+| 3rd      | Rust toolchain's `llvm-tools` `opt`                | `<sysroot>/lib/rustlib/<host>/bin/opt`. Filtered to the same major as `llc`. |
+| 4th      | `opt-22` / `opt-21` / `opt` on `PATH`              | Filtered to the same major as `llc`.                                  |
+
+If no same-major `opt` exists, resolution records a diagnostic naming every
+rejected candidate. The standalone API treats a requested optimization as
+strict and fails; the legacy rustc path falls back to running unoptimized.
+
+Because step 2 keys off whichever `llc` won, pinning `CUDA_OXIDE_LLC` alone is
+usually enough -- the matching `opt` is normally found next to it, and setting
+`CUDA_OXIDE_OPT` as well is only needed when the pair is split across
+directories.
+
+### The other two inputs the pipeline looks for
+
+`llvm-link` is needed only when device code calls into libdevice and the PTX
+path resolves those calls with an IR-level link. `libdevice.10.bc` is needed
+more often: the NVVM path adds it to every module it finalizes, whether or not
+the kernel calls into libdevice. Both have their own override:
+
+| Variable | Selects | Discovery when unset |
+| :------- | :------ | :------------------- |
+| `CUDA_OXIDE_LLVM_LINK` | the `llvm-link` binary | the same four steps as `opt` -- beside the chosen `llc`, then the sysroot, then versioned names on `PATH`, filtered to `llc`'s major. When the variable *is* set it is respected as `CUDA_OXIDE_OPT` is, with a diagnostic naming both binaries if its major differs from `llc`'s |
+| `CUDA_OXIDE_LIBDEVICE` | the `libdevice.10.bc` bitcode file; a path that does not exist is skipped silently | `<root>/nvvm/libdevice/libdevice.10.bc` for each of `CUDA_TOOLKIT_PATH`, `CUDA_HOME`, `CUDA_PATH`, `/usr/local/cuda`, `/opt/cuda` |
+
+When either piece is missing, the two paths react differently. An ordinary
+build does not fail: the backend's path decision sees that the IR-level link
+is unavailable and falls back to the NVVM path, the same automatic switch
+described under target selection. The standalone API's `Linking::Libdevice`
+is strict and fails up front instead, with a `LibdeviceUnavailable` error
+naming the missing piece: `libdevice.10.bc`, or an `llvm-link` sharing the
+selected `llc`'s major.
+
 ## Atomic operations in legacy NVVM IR
 
 An “LLVM-level atomic” is an atomic instruction in the NVVM input. It is not a
@@ -603,15 +669,37 @@ dialect accepts only a subset:
 |:----------------|:----------------|:-----------------------------|
 | Atomic load or store | Not supported as an LLVM atomic instruction | Rejected; it needs another lowering |
 | `fence` | LLVM `fence` is unsupported; an NVVM memory-barrier operation is required | Rejected pending an exact ordering/scope mapping |
-| `cmpxchg` | `i32`/`i64`, plus `i128` on `compute_90+`; global/shared pointers or generic pointers known to refer there | Rejected pending type, address-space, alignment, and ordering validation |
-| `atomicrmw` | Integer `xchg`, `add`, `sub`, `and`, `or`, `xor`, `max`, `min`, `umax`, and `umin` on `i32`/`i64`; `i128 xchg` on `compute_90+`; the same address-space restriction | Rejected pending the same validation |
-| NVVM atomic intrinsics | Provide selected additional operations, including floating-point atomic add | Relaxed, device-scoped `atomicrmw fadd` on `f32`/`f64` in generic/global/shared address spaces is lowered to the exact legacy intrinsic; other atomic RMW operations remain rejected |
+| `cmpxchg` | `i32`/`i64`, plus `i128` on `compute_90+`; global/shared pointers or generic pointers known to refer there | Kept native for `i32`/`i64` at relaxed (monotonic) ordering in the generic, global and shared address spaces; a success ordering stronger than relaxed, or block/system scope, is rewritten to inline PTX. Other widths (`i128` included, on every capability), other address spaces, and a failure ordering stronger than the success ordering are rejected |
+| `atomicrmw` | Integer `xchg`, `add`, `sub`, `and`, `or`, `xor`, `max`, `min`, `umax`, and `umin` on `i32`/`i64`; `i128 xchg` on `compute_90+`; the same address-space restriction | Kept native for `i32`/`i64` in the generic, global and shared address spaces, for those ten operations, at monotonic ordering. Other widths, kinds, orderings and address spaces are rejected |
+| NVVM atomic intrinsics | Provide selected additional operations, including floating-point atomic add | Relaxed, device-scoped `atomicrmw fadd` on `f32`/`f64` in generic/global/shared address spaces is lowered to the exact legacy intrinsic; other *floating-point* atomic RMW operations remain rejected |
 
-The normal LLVM-to-PTX path keeps its existing atomic support. The limitation
-above applies only to the legacy NVVM legalizer. cuda-oxide rejects these
-operations until it can prove that their type, address space, ordering, and
-scope are preserved. The legacy specification also accepts but ignores
-`cmpxchg`'s `weak` marker and failure ordering.
+The normal LLVM-to-PTX path keeps its existing atomic support. The table above
+describes only the legacy NVVM legalizer.
+
+Two rules explain that column. The first is that nothing is
+emitted whose type, address space, ordering and scope cannot be shown to
+survive: [#921](https://github.com/NVlabs/cuda-oxide/pull/921) and
+[#923](https://github.com/NVlabs/cuda-oxide/pull/923) admitted integer RMW
+and compare-exchange by proving those properties rather than by relaxing the
+requirement, which is why the surviving rejections are the cases where the
+proof does not hold.
+
+The second is that **scope is never weakened to fit**. libNVVM's legacy dialect
+drops what it cannot express: an ordered `cmpxchg` lowers to a bare
+`atom.cas.b32`/`.b64` with no ordering qualifier and no surrounding fence,
+which PTX then treats as relaxed. So a block- or system-scoped integer atomic,
+and a compare-exchange whose success ordering is stronger than relaxed, are
+rewritten to inline PTX that states the scope and ordering explicitly instead
+of being handed to libNVVM. That rewrite needs `sm_70` or newer. A failure
+ordering stronger than the success ordering is never rewritten; it is
+rejected outright.
+
+Monotonic is the only ordering an `atomicrmw` reaches here because MIR lowering
+has already split Rust's stronger orderings into separate fences, so the
+instruction itself carries none.
+
+The legacy specification also accepts but ignores `cmpxchg`'s `weak` marker
+and failure ordering.
 
 For the exact accepted types and operations, see the
 [CUDA 12.4 NVVM IR specification](https://docs.nvidia.com/cuda/archive/12.4.0/nvvm-ir-spec/index.html).

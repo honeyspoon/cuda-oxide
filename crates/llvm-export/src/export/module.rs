@@ -16,6 +16,7 @@ use pliron::{
     },
     context::Context,
     linked_list::ContainsLinkedList,
+    location::Located,
     op::Op,
     operation::Operation,
     r#type::{TypeHandle, Typed},
@@ -23,6 +24,7 @@ use pliron::{
 
 use crate::{
     ops,
+    ops::GlobalOpExt,
     types::{ArrayType, FuncType, HalfType, PointerType, VoidType},
 };
 
@@ -31,7 +33,7 @@ use super::{
     config::{DebugKind, ExportBackendConfig, NvvmIrDialect},
     externs::{DeviceExternDecl, DeviceExternType},
     metadata::{emit_nvvm_annotations, emit_nvvmir_version, needs_nvvm_annotations},
-    state::{GlobalSymbolInfo, ModuleExportState},
+    state::{DebugSharedFunctionScope, GlobalSourceInfo, GlobalSymbolInfo, ModuleExportState},
 };
 
 fn validate_export_config(config: &dyn ExportBackendConfig) -> Result<(), String> {
@@ -56,19 +58,50 @@ fn index_module_symbols(
     };
     for operation in block.deref(state.ctx).iter(state.ctx) {
         if let Some(global) = Operation::get_op::<ops::GlobalOp>(operation, state.ctx) {
+            let symbol = global.get_symbol_name(state.ctx).to_string();
+            let value_type = global.get_type(state.ctx);
+            let address_space = global.address_space(state.ctx);
             state.global_symbols.insert(
-                global.get_symbol_name(state.ctx).to_string(),
+                symbol.clone(),
                 GlobalSymbolInfo {
-                    value_type: global.get_type(state.ctx),
-                    address_space: global.address_space(state.ctx),
+                    value_type,
+                    address_space,
                 },
             );
+            if global.is_retained(state.ctx) {
+                state.retained_globals.push(symbol.clone());
+            }
+
+            if let Some(source_key) = global.source_global_key(state.ctx) {
+                let initializer_size = global
+                    .initializer_hex(state.ctx)
+                    .and_then(|hex| u64::try_from(hex.len() / 2).ok());
+                let source_info = GlobalSourceInfo {
+                    symbol: symbol.clone(),
+                    value_type,
+                    address_space,
+                    initializer_size,
+                };
+                if let Some(existing) = state.global_sources.get(&source_key)
+                    && (existing.symbol != source_info.symbol
+                        || existing.value_type != source_info.value_type
+                        || existing.address_space != source_info.address_space
+                        || existing.initializer_size != source_info.initializer_size)
+                {
+                    return Err(format!(
+                        "multiple LLVM globals map to rustc global key `{source_key}`: `@{}` and `@{symbol}`",
+                        existing.symbol
+                    ));
+                }
+                state.global_sources.insert(source_key, source_info);
+            }
         } else if let Some(func) = Operation::get_op::<ops::FuncOp>(operation, state.ctx) {
             let raw_name = func.get_symbol_name(state.ctx);
-            let exported_name = if raw_name.starts_with("llvm_") {
-                super::names::decode_intrinsic_identifier(&raw_name)
+            let raw_name_str: &str = raw_name.as_ref();
+            let exported_name = if raw_name_str.starts_with("llvm_") {
+                super::names::decode_intrinsic_identifier(raw_name_str)
             } else {
-                super::names::strip_device_prefix(&raw_name)
+                super::names::strip_device_prefix(raw_name_str)
             };
             let function_type = func.get_type(state.ctx).into();
             if let Some(existing_name) = state
@@ -82,11 +115,106 @@ fn index_module_symbols(
             state
                 .function_types
                 .insert(exported_name.clone(), function_type);
+            let grid_constants = state.grid_constant_parameters(&func)?;
+            if !grid_constants.is_empty() {
+                state
+                    .function_grid_constants
+                    .insert(exported_name.clone(), grid_constants);
+            }
             if func.get_operation().deref(state.ctx).regions().count() != 0 {
                 state.function_definitions.insert(exported_name);
             }
         }
     }
+    Ok(())
+}
+
+/// Reserve the real owning `DISubprogram` before AS3 globals are emitted.
+///
+/// MIR lowering inserts generated globals at the front of the module, before
+/// their function definitions. LLVM metadata may refer forward, but our text
+/// exporter needs the numeric subprogram id while printing the global. This
+/// prepass derives the source scope from the global identity, validates its raw
+/// owner symbol against the indexed definition, and allocates that definition's
+/// one cached subprogram early. The later function export reuses it.
+fn prepare_debug_shared_function_scopes(
+    state: &mut ModuleExportState<'_>,
+    module: &ModuleOp,
+) -> Result<(), String> {
+    if !state.debug_kind.variables_enabled() {
+        return Ok(());
+    }
+
+    let region = module.get_region(state.ctx).deref(state.ctx);
+    let Some(block) = region.iter(state.ctx).next() else {
+        return Ok(());
+    };
+
+    for operation in block.deref(state.ctx).iter(state.ctx) {
+        let Some(global) = Operation::get_op::<ops::GlobalOp>(operation, state.ctx) else {
+            continue;
+        };
+        if global.address_space(state.ctx) != crate::types::address_space::SHARED {
+            continue;
+        }
+        let Some(info) = ops::debug_global_variable(state.ctx, global.get_operation()) else {
+            continue;
+        };
+        if !info.is_function_local {
+            continue;
+        }
+        let Some(raw_owner) = ops::debug_global_owner_function(state.ctx, global.get_operation())
+        else {
+            // A partial/malformed carrier must not fall back to namespace or CU
+            // scope: that would make one per-block variable look module-global.
+            continue;
+        };
+        let owner = super::function::exported_function_name(&raw_owner);
+        if state
+            .function_source_names
+            .get(&owner)
+            .is_none_or(|indexed| indexed != &raw_owner)
+        {
+            continue;
+        }
+        let Some((function_name, namespace)) = info.namespace.split_last() else {
+            continue;
+        };
+        if namespace.is_empty() {
+            continue;
+        }
+        let scope = DebugSharedFunctionScope {
+            namespace: namespace.to_vec(),
+            name: function_name.clone(),
+        };
+        if let Some(previous) = state
+            .debug_shared_function_scopes
+            .insert(owner.clone(), scope.clone())
+            && previous != scope
+        {
+            return Err(format!(
+                "conflicting source scopes for shared-static owner `@{owner}`: {previous:?} versus {scope:?}"
+            ));
+        }
+    }
+
+    for operation in block.deref(state.ctx).iter(state.ctx) {
+        let Some(function) = Operation::get_op::<ops::FuncOp>(operation, state.ctx) else {
+            continue;
+        };
+        if function.get_operation().deref(state.ctx).regions().count() == 0 {
+            continue;
+        }
+        let raw_name = function.get_symbol_name(state.ctx);
+        let owner = super::function::exported_function_name(raw_name.as_ref());
+        if state.debug_shared_function_scopes.contains_key(&owner) {
+            let loc = function.get_operation().deref(state.ctx).loc();
+            let debug_name = ops::debug_function_name(state.ctx, function.get_operation())
+                .unwrap_or_else(|| owner.clone());
+            state.debug_subprogram_for_function(&debug_name, &owner, &loc);
+        }
+    }
+
     Ok(())
 }
 
@@ -124,6 +252,20 @@ fn validate_device_extern_function_shape(
     let Some(function_type) = state.function_types.get(&decl.export_name).copied() else {
         return Ok(());
     };
+
+    // A device extern describes the ordinary callable ABI. Erased pointer
+    // shapes alone cannot establish compatibility with a kernel declaration
+    // that transports the pointee's bytes by value. Suppressing that declaration
+    // would otherwise discard both its byval storage and grid-constant metadata.
+    if state
+        .function_grid_constants
+        .contains_key(&decl.export_name)
+    {
+        return Err(format!(
+            "device extern `@{}` conflicts with a grid-constant kernel declaration; its launch ABI is not an ordinary device function ABI",
+            decl.export_name
+        ));
+    }
 
     if state.function_definitions.contains(&decl.export_name) {
         return Err(format!(
@@ -185,22 +327,69 @@ fn root_function_names<'a>(state: &'a ModuleExportState<'_>) -> Vec<&'a str> {
 }
 
 fn emit_llvm_used(output: &mut String, state: &ModuleExportState<'_>) -> Result<(), String> {
-    let names = root_function_names(state);
-    if names.is_empty() {
+    let function_names = root_function_names(state);
+    let mut global_names = state
+        .retained_globals
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    global_names.sort_unstable();
+    global_names.dedup();
+    if function_names.is_empty() && global_names.is_empty() {
         return Ok(());
     }
 
-    let mut used_refs = Vec::with_capacity(names.len());
+    let mut used_refs = Vec::with_capacity(function_names.len() + global_names.len());
     let element_type = if state.legacy_typed_pointers() {
-        for name in names {
+        for name in function_names {
             let mut reference = String::from("i8* bitcast (");
-            state.export_function_pointer_type(state.function_type(name)?, &mut reference)?;
+            state.export_named_function_pointer_type(name, &mut reference)?;
             write!(&mut reference, " @{name} to i8*)").unwrap();
+            used_refs.push(reference);
+        }
+        for name in global_names {
+            let info = state
+                .global_symbols
+                .get(name)
+                .ok_or_else(|| format!("retained global `@{name}` was not indexed"))?;
+            let mut reference = String::from("i8* ");
+            if info.address_space == 0 {
+                reference.push_str("bitcast (");
+                state.export_type(info.value_type, &mut reference)?;
+                write!(&mut reference, "* @{name} to i8*)").unwrap();
+            } else {
+                reference.push_str("addrspacecast (");
+                state.export_type(info.value_type, &mut reference)?;
+                write!(
+                    &mut reference,
+                    " addrspace({})* @{name} to i8*)",
+                    info.address_space
+                )
+                .unwrap();
+            }
             used_refs.push(reference);
         }
         "i8*"
     } else {
-        used_refs.extend(names.into_iter().map(|name| format!("ptr @{name}")));
+        used_refs.extend(
+            function_names
+                .into_iter()
+                .map(|name| format!("ptr @{name}")),
+        );
+        for name in global_names {
+            let info = state
+                .global_symbols
+                .get(name)
+                .ok_or_else(|| format!("retained global `@{name}` was not indexed"))?;
+            if info.address_space == 0 {
+                used_refs.push(format!("ptr @{name}"));
+            } else {
+                used_refs.push(format!(
+                    "ptr addrspacecast (ptr addrspace({}) @{name} to ptr)",
+                    info.address_space
+                ));
+            }
+        }
         "ptr"
     };
 
@@ -392,8 +581,10 @@ pub(super) fn export_module_with_externs_impl(
         emit_ptx_kernel_keyword,
         config.debug_kind(),
         config.nvvm_ir_dialect(),
+        config.function_local_static_placement(),
     );
     index_module_symbols(&mut state, module)?;
+    prepare_debug_shared_function_scopes(&mut state, module)?;
     index_device_externs(&mut state, device_externs)?;
 
     // 1. Header
@@ -474,7 +665,7 @@ pub(super) fn export_module_with_externs_impl(
                 let func_name = func.get_symbol_name(ctx);
 
                 // Skip device extern declarations - already emitted in section 2
-                if is_decl && device_extern_names.contains(func_name.as_str()) {
+                if is_decl && device_extern_names.contains(func_name.as_ref()) {
                     continue;
                 }
 
@@ -581,8 +772,10 @@ pub(super) fn export_module_to_string_with_config(
         emit_ptx_kernel_keyword,
         config.debug_kind(),
         config.nvvm_ir_dialect(),
+        config.function_local_static_placement(),
     );
     index_module_symbols(&mut state, module)?;
+    prepare_debug_shared_function_scopes(&mut state, module)?;
 
     // 1. Header
     writeln!(

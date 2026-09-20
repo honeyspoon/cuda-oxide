@@ -53,8 +53,9 @@ PreparedLaunch<K>  -> safe launch of exactly K
 GPU execution can still overlap the host until you synchronize.
 
 ```rust
-use cuda_device::{cuda_module, kernel, thread, DisjointSlice};
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, DeviceBuffer};
+use cuda_device::{DisjointSlice, cuda_module, kernel, thread};
 
 #[cuda_module]
 mod kernels {
@@ -123,7 +124,7 @@ Declare the kernel's geometry when it is part of correctness:
 
 ```rust
 use cuda_core::LaunchConfig1D;
-use cuda_device::{cuda_module, kernel, launch_bounds, launch_contract, thread, DisjointSlice};
+use cuda_device::{DisjointSlice, cuda_module, kernel, launch_bounds, launch_contract, thread};
 
 #[cuda_module]
 mod contracted {
@@ -189,8 +190,8 @@ meaningful for their domain:
 
 ```rust
 use cuda_device::config::{
-    Atom, AtomKind, AtomSpec, Block, Global, Policy, PolicyId, RowMajor, Shape1,
-    Thread, Tile, TileSpec,
+    Atom, AtomKind, AtomSpec, Block, Global, Policy, PolicyId, RowMajor, Shape1, Thread, Tile,
+    TileSpec,
 };
 
 enum XorRotate {}
@@ -288,9 +289,7 @@ responsible for choosing its namespace and preventing duplicate IDs.
 Policy-associated constants can be used by supported compile-time attributes:
 
 ```rust
-use cuda_device::{
-    cuda_module, kernel, launch_bounds, launch_contract, thread,
-};
+use cuda_device::{cuda_module, kernel, launch_bounds, launch_contract, thread};
 
 #[cuda_module]
 mod kernels {
@@ -525,7 +524,7 @@ explains why this can differ from the normal LLVM-to-PTX path.
 `LaunchConfig` specifies the grid shape:
 
 ```rust
-use cuda_core::LaunchConfig;
+use cuda_core::simt::LaunchConfig;
 
 let config = LaunchConfig {
     grid_dim: (num_blocks, 1, 1),
@@ -585,8 +584,8 @@ instead of enqueuing immediately. No stream is specified at launch time -- the
 scheduling policy chooses one when the operation is executed:
 
 ```rust
-use cuda_async::device_context::init_device_contexts;
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::simt::device_context::init_device_contexts;
+use cuda_async::simt::device_operation::DeviceOperation;
 
 init_device_contexts(0, 1)?;
 let module = kernels::load_async(0)?;
@@ -690,7 +689,7 @@ memory via **distributed shared memory** (DSMEM). To launch with clusters, add
 `#[cluster_launch]` to the kernel and include `cluster_dim` in the launch:
 
 ```rust
-use cuda_device::{kernel, cluster, cluster_launch, DisjointSlice};
+use cuda_device::{DisjointSlice, cluster, cluster_launch, kernel};
 
 #[kernel]
 #[cluster_launch(4, 1, 1)]
@@ -738,7 +737,7 @@ owned-async) then submits through `cuLaunchKernelEx` with the
 `CU_LAUNCH_ATTRIBUTE_COOPERATIVE` attribute set:
 
 ```rust
-use cuda_device::{cooperative_launch, grid, kernel, DisjointSlice};
+use cuda_device::{DisjointSlice, cooperative_launch, grid, kernel};
 
 #[cuda_module]
 mod kernels {
@@ -783,6 +782,8 @@ in doubt.
 | `CUDA_ERROR_ILLEGAL_INSTRUCTION`       | Kernel hit a trap (panic, assert failure, OOB)         | Debug with `cargo oxide debug` or `gpu_printf!`                      |
 | `CUDA_ERROR_NO_BINARY_FOR_GPU`         | PTX compiled for wrong architecture                    | Rebuild with `--arch` matching your GPU                              |
 | `CUDA_ERROR_UNSUPPORTED_PTX_VERSION` (222) | Driver cannot compile the PTX version in the module | Select a compatible `CUDA_TOOLKIT_PATH` or upgrade the driver        |
+| `CUDA_ERROR_NOT_INITIALIZED`           | `libcuda` missing, or the driver's CUDA major is older than the toolkit's | Install an R580+ driver; the error text names the files the loader tried |
+| `CUDA_ERROR_NOT_FOUND` (from a non-launch call) | Driver symbol missing from the loaded `libcuda`     | Upgrade the driver to the toolkit's CUDA version                       |
 
 :::{seealso}
 The [Error Handling and Debugging](error-handling-and-debugging.md) chapter

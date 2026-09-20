@@ -74,7 +74,8 @@ mod kernels {
 // =============================================================================
 
 fn main() {
-    use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+    use cuda_core::simt::LaunchConfig;
+    use cuda_core::{CudaContext, DeviceBuffer};
 
     println!("=== elect.sync warp leader election (sm_90+) ===\n");
 
@@ -91,11 +92,7 @@ fn main() {
         return;
     }
 
-    let module = ctx
-        .load_module_from_file("elect_leader.ptx")
-        .expect("Failed to load PTX module");
-    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
-
+    let module = kernels::load(&ctx).expect("Failed to load embedded CUDA module");
     // A single warp is all we need to demonstrate election semantics.
     let cfg = LaunchConfig {
         block_dim: (32, 1, 1),

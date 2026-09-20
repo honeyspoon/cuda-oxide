@@ -13,10 +13,17 @@
 //! - Shared memory address casting
 //! - 64-bit arithmetic
 //! - Parallel for loop patterns
+//! - Full-debug closure environments
+//! - Full-debug Rust enum variants (direct and niche layouts)
+//! - Full-debug static and dereference projections
+//! - Full-debug runtime-indexed fixed-array references
+//! - Full-debug enum payload source projections
 //!
 //! Run: cargo oxide run compiler_features
 
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, DeviceBuffer};
+use cuda_device::shared::cvta_generic_to_shared_offset;
 use cuda_device::{DisjointSlice, SharedArray, kernel, thread};
 use cuda_host::cuda_module;
 
@@ -26,6 +33,20 @@ use cuda_host::cuda_module;
 #[cuda_module]
 mod kernels {
     use super::*;
+
+    /// Direct-tag enum used by the full-debug DWARF smoke test.
+    #[repr(u8)]
+    enum DebugDirectEnum {
+        Small(u32) = 3,
+        Wide(u64) = 9,
+    }
+
+    /// Aggregate used to force a non-zero `Field` debug projection.
+    #[repr(C)]
+    struct DebugProjectionStruct {
+        prefix: u8,
+        projected_field: u64,
+    }
 
     /// Test multi-way match on u32
     #[kernel]
@@ -51,9 +72,155 @@ mod kernels {
     pub fn test_option(val: u32, mut out: DisjointSlice<u32>) {
         let idx = thread::index_1d();
         if let Some(out_elem) = out.get_mut(idx) {
+            // `get_mut` has returned: this PC belongs only to the kernel.
+            // CUDA_OXIDE_DEBUG_INLINE_CALLER_BREAKPOINT
             let maybe: Option<u32> = if val > 0 { Some(val) } else { None };
             let result = maybe.unwrap_or_default();
             *out_elem = result;
+        }
+    }
+
+    /// Full-debug fixture for direct-tag and niche-layout Rust enums.
+    ///
+    /// The breakpoint is after all four locals are initialized so cuda-gdb can
+    /// inspect both the active variant and its payload.
+    // The explicit match on each enum is the fixture: all four variant
+    // reads stay spelled out the same way for cuda-gdb inspection.
+    #[allow(clippy::manual_unwrap_or, clippy::manual_unwrap_or_default)]
+    #[kernel]
+    pub fn test_enum_debug(seed: u32, mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let option_value: Option<u32> = Some(seed + 1);
+            let result_value: Result<u32, u64> = Err(0x1_0000_0009u64);
+            let direct_value = if seed == 0 {
+                DebugDirectEnum::Small(17)
+            } else {
+                DebugDirectEnum::Wide(0x2_0000_000Bu64)
+            };
+            let pointee = seed + 5;
+            let niche_value: Option<&u32> = Some(&pointee);
+
+            *out_elem = seed; // CUDA_OXIDE_DEBUG_ENUM_BREAKPOINT
+
+            let option_part = match option_value {
+                Some(value) => value,
+                None => 0,
+            };
+            let result_part = match result_value {
+                Ok(value) => value,
+                Err(value) => value as u32,
+            };
+            let direct_part = match direct_value {
+                DebugDirectEnum::Small(value) => value,
+                DebugDirectEnum::Wide(projected_enum_payload) => {
+                    let part = projected_enum_payload as u32; // CUDA_OXIDE_DEBUG_ENUM_PROJECTION_BREAKPOINT
+                    part
+                }
+            };
+            let niche_part = match niche_value {
+                Some(value) => *value,
+                None => 0,
+            };
+
+            *out_elem = option_part + result_part + direct_part + niche_part;
+        }
+    }
+
+    /// Helper whose destructured arguments produce rustc MIR debug places with
+    /// static `Field` and `ConstantIndex` projections.
+    #[inline(never)]
+    fn debug_projection_values(
+        DebugProjectionStruct {
+            projected_field, ..
+        }: DebugProjectionStruct,
+        (_, projected_tuple): (u32, u64),
+        [_, _, projected_array, _]: [u32; 4],
+    ) -> u32 {
+        let field_part = projected_field as u32; // CUDA_OXIDE_DEBUG_PROJECTION_BREAKPOINT
+        field_part
+            .wrapping_add(projected_tuple as u32)
+            .wrapping_add(projected_array)
+    }
+
+    /// Full-debug fixture for statically-addressable source projections.
+    #[kernel]
+    pub fn test_projection_debug(seed: u32, mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            *out_elem = debug_projection_values(
+                DebugProjectionStruct {
+                    prefix: 0xA5,
+                    projected_field: seed as u64 + 11,
+                },
+                (seed, 0x1_0000_0021u64),
+                [3u32, 5, 37, 11],
+            );
+        }
+    }
+
+    /// Helper whose reference binding becomes a statement-level
+    /// `AssignRef(values[runtime_index])` after `ReferencePropagation`.
+    #[inline(never)]
+    fn debug_runtime_index_value(values: [u32; 4], runtime_index: usize) -> u32 {
+        let projected_runtime = &values[runtime_index];
+        let value = *projected_runtime; // CUDA_OXIDE_DEBUG_RUNTIME_INDEX_BREAKPOINT
+        value
+    }
+
+    /// Full-debug fixture for one runtime index into a fixed-size array.
+    #[kernel]
+    pub fn test_runtime_index_debug(seed: u32, mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let runtime_index = (seed as usize) & 3;
+            *out_elem = debug_runtime_index_value([13u32, 21, 34, 55], runtime_index);
+        }
+    }
+
+    /// Helper whose destructured references produce MIR `Deref` and
+    /// `Deref -> Field` debug projections.
+    #[inline(never)]
+    fn debug_deref_projection_values(
+        &DebugProjectionStruct {
+            projected_field: deref_field,
+            ..
+        }: &DebugProjectionStruct,
+        &deref_value: &u32,
+    ) -> u32 {
+        let field_part = deref_field as u32; // CUDA_OXIDE_DEBUG_DEREF_BREAKPOINT
+        field_part.wrapping_add(deref_value)
+    }
+
+    /// Full-debug fixture for one thin-reference dereference followed by fields.
+    #[kernel]
+    pub fn test_deref_projection_debug(seed: u32, mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let aggregate = DebugProjectionStruct {
+                prefix: 0xA5,
+                projected_field: seed as u64 + 11,
+            };
+            let value = 41u32;
+            *out_elem = debug_deref_projection_values(&aggregate, &value);
+        }
+    }
+
+    /// Full-debug fixture for closure environment DWARF.
+    ///
+    /// The `move` closure forces two scalar captures into the environment so
+    /// cuda-gdb can verify the generated composite type and inspect both
+    /// `capture_0` and `capture_1`.
+    #[kernel]
+    pub fn test_closure_debug(seed: u32, mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let captured_u32 = seed + 10;
+            let captured_u64 = 0x1_0000_0020u64;
+            let closure = move |x: u32| x + captured_u32 + captured_u64 as u32;
+            *out_elem = seed; // CUDA_OXIDE_DEBUG_CLOSURE_BREAKPOINT
+            let closure_result = closure(5u32);
+            *out_elem = closure_result;
         }
     }
 
@@ -202,7 +369,7 @@ mod kernels {
         }
     }
 
-    /// Test Via *const u8 (current approach - has cvta round-trip)
+    /// Test Via *const u8 (must agree with the direct cast)
     #[kernel]
     pub unsafe fn test_smem_addr_via_ptr_u8(mut out: DisjointSlice<u64>) {
         static mut SMEM: SharedArray<u8, 256, 128> = SharedArray::UNINIT;
@@ -211,6 +378,18 @@ mod kernels {
         if let Some(out_elem) = out.get_mut(idx) {
             let addr = &raw const SMEM as *const u8 as u64;
             *out_elem = addr;
+        }
+    }
+
+    /// Test the explicit raw `.shared` offset path for hardware descriptors
+    #[kernel]
+    pub unsafe fn test_smem_addr_shared_offset(mut out: DisjointSlice<u64>) {
+        static mut SMEM: SharedArray<u8, 256, 128> = SharedArray::UNINIT;
+
+        let idx = thread::index_1d();
+        if let Some(out_elem) = out.get_mut(idx) {
+            let offset = unsafe { cvta_generic_to_shared_offset(&raw const SMEM as *const u8) };
+            *out_elem = offset;
         }
     }
 
@@ -458,9 +637,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = CudaContext::new(0)?;
     let stream = ctx.default_stream();
 
-    let module = ctx.load_module_from_file("compiler_features.ptx")?;
-    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
-
+    let module = kernels::load(&ctx)?;
     const N: usize = 1;
     let cfg = LaunchConfig::for_num_elems(N as u32);
 
@@ -550,6 +727,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assert_eq!(result[0], expected, "test_option({}) failed", val);
             println!("  ✓ val={}: {} (expected {})", val, result[0], expected);
         }
+    }
+
+    // Test enum lowering and keep deterministic direct/niche debug fixtures live.
+    println!("Testing: test_enum_debug");
+    {
+        let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N)?;
+        // seed=7: Some(8) + Err(...09) + Wide(...0B) + Some(&12) = 40.
+        // SAFETY: launch shape/resources match the kernel; buffers cover its accesses.
+        unsafe { module.test_enum_debug((stream).as_ref(), cfg, 7u32, &mut out_dev) }?;
+        let result = out_dev.to_host_vec(&stream)?;
+        assert_eq!(result[0], 40, "test_enum_debug failed");
+        println!("  ✓ Result: {} (expected 40)", result[0]);
+    }
+
+    // Test projected debug bindings and keep deterministic Field/ConstantIndex values live.
+    println!("Testing: test_projection_debug");
+    {
+        let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N)?;
+        // seed=7: projected_field=18, projected_tuple low32=33, projected_array=37.
+        // SAFETY: launch shape/resources match the kernel; buffers cover its accesses.
+        unsafe { module.test_projection_debug((stream).as_ref(), cfg, 7u32, &mut out_dev) }?;
+        let result = out_dev.to_host_vec(&stream)?;
+        assert_eq!(result[0], 88, "test_projection_debug failed");
+        println!("  ✓ Result: {} (expected 88)", result[0]);
+    }
+
+    // Test runtime-index debug bindings on a fixed-size array via the debug stack-home bridge.
+    println!("Testing: test_runtime_index_debug");
+    {
+        let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N)?;
+        // Keep index 3 first for CUDA-GDB, then exercise every other runtime index.
+        for (seed, expected) in [(7u32, 55), (0, 13), (1, 21), (2, 34)] {
+            // SAFETY: launch shape/resources match the kernel; buffers cover its accesses.
+            unsafe { module.test_runtime_index_debug((stream).as_ref(), cfg, seed, &mut out_dev) }?;
+            let result = out_dev.to_host_vec(&stream)?;
+            assert!(
+                result.iter().all(|&value| value == expected),
+                "test_runtime_index_debug failed for seed {seed}"
+            );
+            println!("  ✓ Runtime index {}: {expected}", seed & 3);
+        }
+    }
+
+    // Test dereference debug bindings and keep deterministic values live.
+    println!("Testing: test_deref_projection_debug");
+    {
+        let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N)?;
+        // seed=7: deref_field=18 and deref_value=41.
+        // SAFETY: launch shape/resources match the kernel; buffers cover its accesses.
+        unsafe { module.test_deref_projection_debug((stream).as_ref(), cfg, 7u32, &mut out_dev) }?;
+        let result = out_dev.to_host_vec(&stream)?;
+        assert_eq!(result[0], 59, "test_deref_projection_debug failed");
+        println!("  ✓ Result: {} (expected 59)", result[0]);
+    }
+
+    // Test closure lowering and keep a deterministic full-debug fixture live.
+    println!("Testing: test_closure_debug");
+    {
+        let mut out_dev = DeviceBuffer::<u32>::zeroed(&stream, N)?;
+        // capture_0 = seed + 10 = 17, capture_1 low 32 bits = 32, x = 5.
+        // SAFETY: launch shape/resources match the kernel; buffers cover its accesses.
+        unsafe { module.test_closure_debug((stream).as_ref(), cfg, 7u32, &mut out_dev) }?;
+        let result = out_dev.to_host_vec(&stream)?;
+        assert_eq!(result[0], 54, "test_closure_debug failed");
+        println!("  ✓ Result: {} (expected 54)", result[0]);
     }
 
     // Test for loop sum
@@ -865,16 +1107,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n-----------------------------------------");
     println!("SHARED MEMORY ADDRESS CASTING TESTS");
     println!("-----------------------------------------");
-    println!("Comparing: &raw const SMEM as u64  vs  &raw const SMEM as *const u8 as u64");
-    println!();
 
     let mut smem_direct_ok = true;
 
-    // Test 1: DIRECT cast - &raw const SMEM as u64.
-    // This is a real pass/fail test: the direct cast must keep the address
-    // in the shared address space (small value, no cvta round-trip).
-    println!("Testing: test_smem_addr_direct_u64 (&raw const SMEM as u64)");
-    {
+    // Rust-observed pointer addresses are CUDA generic addresses (the nvcc
+    // model): `ptr as u64` must yield the same nonzero generic address
+    // whether or not an intermediate `*const u8` cast is involved. The raw
+    // `.shared` window offset is available only through the explicit
+    // `cvta_generic_to_shared_offset` intrinsic, which hardware SMEM descriptors
+    // consume.
+    println!("Testing: generic-address contract for shared statics");
+    let direct = {
         let mut out_dev = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
         unsafe {
             module.test_smem_addr_direct_u64(
@@ -883,24 +1126,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &mut out_dev,
             )
         }?;
-        let result = out_dev.to_host_vec(&stream)?;
-        println!("  DIRECT addr: 0x{:016x}", result[0]);
-        if result[0] < 0x100000 {
-            println!("  ✓ SMALL value = likely shared address (what we want!)");
-        } else {
-            println!("  ✗ FAILED: LARGE value = generic address (cvta happened)");
-            smem_direct_ok = false;
-        }
-    }
-
-    // Test 2: Via *const u8 (informational, documents known limitation).
-    // The intermediate `*const u8` cast currently triggers a cvta round-trip;
-    // we print the observed address but don't fail on it. Whenever this lights
-    // up as "SMALL value" we know the upstream codegen quirk is gone and we
-    // can promote it to a real assertion.
-    println!("\nInfo: test_smem_addr_via_ptr_u8 (&raw const SMEM as *const u8 as u64)");
-    println!("  (known: today's lowering inserts a cvta round-trip here)");
-    {
+        out_dev.to_host_vec(&stream)?[0]
+    };
+    let via_ptr = {
         let mut out_dev = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
         unsafe {
             module.test_smem_addr_via_ptr_u8(
@@ -909,17 +1137,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &mut out_dev,
             )
         }?;
-        let result = out_dev.to_host_vec(&stream)?;
-        println!("  VIA PTR addr: 0x{:016x}", result[0]);
-        if result[0] < 0x100000 {
-            println!("  (small value — cvta round-trip elided)");
-        } else {
-            println!("  (large value — cvta round-trip present, as documented)");
-        }
-    }
+        out_dev.to_host_vec(&stream)?[0]
+    };
+    let shared_offset = {
+        let mut out_dev = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
+        unsafe {
+            module.test_smem_addr_shared_offset(
+                (stream).as_ref(),
+                LaunchConfig::for_num_elems(1),
+                &mut out_dev,
+            )
+        }?;
+        out_dev.to_host_vec(&stream)?[0]
+    };
 
-    println!("\n-----------------------------------------");
-    println!("Check PTX for 'cvta' in each test function.");
+    println!("  DIRECT addr:   0x{direct:016x}");
+    println!("  VIA PTR addr:  0x{via_ptr:016x}");
+    println!("  SHARED offset: 0x{shared_offset:016x}");
+    if direct == 0 {
+        println!("  ✗ FAILED: generic address of a valid shared static is null");
+        smem_direct_ok = false;
+    }
+    if direct != via_ptr {
+        println!("  ✗ FAILED: the two Rust-level casts disagree on the address");
+        smem_direct_ok = false;
+    }
+    if shared_offset >= 0x100000 {
+        println!("  ✗ FAILED: cvta_generic_to_shared_offset must yield the raw .shared offset");
+        smem_direct_ok = false;
+    }
+    if shared_offset % 128 != 0 {
+        println!("  ✗ FAILED: shared offset ignores the array's 128-byte alignment");
+        smem_direct_ok = false;
+    }
+    if smem_direct_ok {
+        println!("  ✓ generic addresses agree and are non-null; raw offset via intrinsic");
+    }
 
     if !smem_direct_ok {
         println!("\n=== FAILED: at least one test did not pass ===");

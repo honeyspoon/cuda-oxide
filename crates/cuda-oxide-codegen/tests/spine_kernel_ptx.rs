@@ -8,7 +8,7 @@
 //!
 //! This builds the irreducible `out[i] = a[i] + b[i]` kernel directly in
 //! `dialect-mir` + `dialect-nvvm` (no rustc, no CubeCL), drives it through
-//! the experimental `Compiler`, and asserts the emitted PTX carries a
+//! the standalone `Compiler`, and asserts the emitted PTX carries a
 //! `.visible .entry` for `sm_120` that `ptxas` compiles to a cubin. The kernel
 //! constructed here is the recipe a later CubeCL-walk task mirrors.
 //!
@@ -18,11 +18,12 @@
 //! carrying a `gpu_kernel` *attribute* on the func op. There is no calling
 //! convention to set by hand and no naming convention. The chain is:
 //!
-//!   1. `mir-lower`'s `is_kernel_func` (crates/mir-lower/src/convert/types.rs)
+//!   1. `mir-lower`'s `is_kernel_func`
+//!      (crates/mir-lower/src/convert/types/func_abi.rs)
 //!      returns `true` iff the func op's `attributes` contain a `StringAttr`
 //!      under the identifier `gpu_kernel`. The *value* is not inspected, only
 //!      presence; the rest of the pipeline writes `"true"`.
-//!   2. During lowering (lowering.rs:132) `propagate_kernel_attrs` copies a
+//!   2. During lowering, `lowering.rs`'s `propagate_kernel_attrs` copies a
 //!      `gpu_kernel="true"` `StringAttr` onto the produced `llvm::FuncOp` (plus
 //!      any optional `cluster_dim_*`/`maxntid`/`minctasm` ints).
 //!   3. `llvm-export`'s `PtxExportConfig::emit_ptx_kernel_keyword()` is `true`,
@@ -271,6 +272,31 @@ fn build_unused_helper(module: &mut CodegenModule) {
     });
 }
 
+/// Locate `ptxas`. Discovery order, mirroring the toolkit contract that
+/// `cargo oxide doctor`'s `cuda_toolkit_root` implements (the shared
+/// `cuda-bindings` build script in NVlabs/cutile-rs probes the same way):
+///
+/// 1. `CUDA_TOOLKIT_PATH`, then `CUDA_HOME` — first non-empty one wins
+/// 2. `/usr/local/cuda`, the conventional default prefix
+/// 3. bare `ptxas`, leaving resolution to `PATH`
+///
+/// Step 3 is what CI relies on, since the toolkit action puts `ptxas` on `PATH`.
+/// Steps 1 and 2 are what a local checkout relies on: the build scripts fully
+/// support a toolkit installed at any prefix, so this test should not be the one
+/// place that ignores where it was told the toolkit lives.
+fn find_ptxas() -> std::path::PathBuf {
+    ["CUDA_TOOLKIT_PATH", "CUDA_HOME"]
+        .iter()
+        .filter_map(|var| std::env::var(var).ok())
+        .filter(|root| !root.trim().is_empty())
+        .map(|root| std::path::PathBuf::from(root).join("bin/ptxas"))
+        .chain(std::iter::once(std::path::PathBuf::from(
+            "/usr/local/cuda/bin/ptxas",
+        )))
+        .find(|candidate| candidate.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("ptxas"))
+}
+
 #[test]
 fn spine_add_kernel_emits_entry_and_validates() {
     let mut module = CodegenModule::new("spine_module").unwrap();
@@ -327,14 +353,10 @@ fn spine_add_kernel_emits_entry_and_validates() {
     let cubin_path = dir.join("spine.cubin");
     std::fs::write(&ptx_path, &ptx).unwrap();
 
-    let ptxas = if std::path::Path::new("/usr/local/cuda/bin/ptxas").exists() {
-        "/usr/local/cuda/bin/ptxas"
-    } else {
-        "ptxas"
-    };
+    let ptxas = find_ptxas();
     // Capture the Result before cleanup so the scratch dir is always removed,
     // even when ptxas is absent and `.output()` would otherwise panic.
-    let ptxas_result = std::process::Command::new(ptxas)
+    let ptxas_result = std::process::Command::new(&ptxas)
         .arg("-arch=sm_120")
         .arg("--compile-only")
         .arg(&ptx_path)
@@ -345,7 +367,14 @@ fn spine_add_kernel_emits_entry_and_validates() {
     // Cleanup before any assert or expect so the dir is reclaimed on all paths.
     let _ = std::fs::remove_dir_all(&dir);
 
-    let out = ptxas_result.expect("ptxas runs");
+    let out = ptxas_result.unwrap_or_else(|error| {
+        panic!(
+            "could not run {}: {error}\nThis test needs `ptxas` from a CUDA \
+             toolkit (no GPU required). Point CUDA_TOOLKIT_PATH or CUDA_HOME at \
+             the install root, or put `ptxas` on PATH.",
+            ptxas.display()
+        )
+    });
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),

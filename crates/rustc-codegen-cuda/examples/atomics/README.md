@@ -8,13 +8,13 @@ fence-splitting workaround -- running end-to-end on real hardware.
 
 ## Prerequisites
 
-### LLVM 22
+### LLVM 22+
 
 Atomic operations require **LLVM 22 or newer** for correct syncscope
 generation. Without it, scopes (`.gpu`, `.cta`, `.sys`) will be missing
 from generated PTX.
 
-The pinned Rust toolchain (`nightly-2026-04-03`) ships LLVM 22 with NVPTX
+The pinned Rust toolchain (`nightly-2026-08-28`) ships LLVM 23 with NVPTX
 enabled via the `llvm-tools` component, so the default onboarding path
 already satisfies this requirement:
 
@@ -24,15 +24,15 @@ rustup component add llvm-tools  # already listed in rust-toolchain.toml
 
 The pipeline auto-picks `<sysroot>/lib/rustlib/<host>/bin/llc` first.
 
-If you prefer a system LLVM 22 install (Ubuntu / Debian):
+If you prefer a system LLVM install (Ubuntu / Debian):
 
 ```bash
 wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && sudo ./llvm.sh 22
 llc-22 --version  # Should show 22.x
 ```
 
-Resolution order: `$CUDA_OXIDE_LLC` → rustup `llc` → `llc-22` → `llc-21` →
-`llc` on `PATH`. To pin a specific binary:
+Resolution order: `$CUDA_OXIDE_LLC` → rustup `llc` → `llc-23` → `llc-22` →
+`llc-21` → `llc` on `PATH`. To pin a specific binary:
 
 ```bash
 export CUDA_OXIDE_LLC=/path/to/llc
@@ -55,7 +55,7 @@ CUDA_OXIDE_LLC=/path/to/llc-22 cargo oxide run atomics
 CUDA_OXIDE_VERBOSE=1 cargo oxide run atomics
 ```
 
-## Test Suite (20 tests)
+## Test Suite (22 runtime tests)
 
 ### Phase 1: Core operations (AtomicU32/I32)
 
@@ -93,9 +93,26 @@ CUDA_OXIDE_VERBOSE=1 cargo oxide run atomics
 
 ### Phase 4: Standard library atomics (`core::sync::atomic`)
 
-| #  | Test                             | What it verifies                                                              |
-|----|----------------------------------|-------------------------------------------------------------------------------|
-| 20 | `core_atomic_fetch_add_test`     | `core::sync::atomic::AtomicU32` fetch_add (system scope, Relaxed)             |
+| #  | Test                         | What it verifies                                                        |
+|----|------------------------------|-------------------------------------------------------------------------|
+| 20 | `core_atomic_fetch_add_test` | `core::sync::atomic::AtomicU32` fetch_add (system scope, Relaxed)        |
+| 21 | `core_atomic_ptr_test`       | `core::sync::atomic::AtomicPtr<u16>` load/store/swap/compare_exchange   |
+| 22 | `core_atomic_local_test`     | Private pointer/integer atomics, helper calls and wrapping arithmetic |
+
+The pointer test gives each thread a distinct mutable storage slot and checks
+both successful and failed compare-exchange, then reads through the loaded
+pointer. The local test calls the same pointer helper with per-thread storage.
+Pointer types survive compiler lowering; legacy NVVM uses scoped PTX for
+pointer exchange and compare-exchange. Private atomic storage uses ordinary
+accesses because no other thread can observe it.
+
+Contended counters use raw writable device pointers and the existing
+`from_ptr` atomic constructors. The host keeps their allocations alive and
+excludes non-atomic access until synchronization. Block barriers are reached
+by every thread, including the thread that performs the update.
+
+The separate `core_atomic_ordering_probe` kernel provides compile-only
+standard-library atomic ordering coverage.
 
 ## Expected Output
 
@@ -171,7 +188,13 @@ CUDA_OXIDE_VERBOSE=1 cargo oxide run atomics
 --- Test 20: core_atomic_fetch_add_test (core::sync::atomic) ---
   counter = 256 (expected 256), all old values unique
 
-=== SUCCESS: All atomic tests passed! ===
+--- Test 21: core_atomic_ptr_test (core::sync::atomic::AtomicPtr) ---
+  all 256 threads passed AtomicPtr load/store/swap/CAS
+
+--- Test 22: core_atomic_local_test ---
+  all 256 threads passed private pointer and integer atomic operations
+
+=== SUCCESS: All 22 runtime atomic tests passed! ===
 ```
 
 ## Available Atomic Types
@@ -200,13 +223,13 @@ All types are defined in `cuda_device::atomic`:
 | `swap`             | Yes                                                  | Yes (`atom.exch.b32/b64`)    |
 | `compare_exchange` | Yes                                                  | -- (PTX has no float CAS)    |
 
-## LLVM 22 Limitations (and Workarounds)
+## LLVM 21/22 Limitations (and Workarounds)
 
-### `atomicrmw` ordering is silently dropped
+### `atomicrmw` ordering is silently dropped (fixed in LLVM 23)
 
-LLVM's NVPTX backend ignores memory orderings on `atomicrmw` instructions
-in both llc-21 and llc-22. All `atomicrmw add/sub/and/or/xor/exch/min/max`
-produce bare `atom.<op>` without ordering or scope qualifiers.
+The LLVM 21/22 NVPTX backend ignores memory orderings on `atomicrmw`
+instructions. All `atomicrmw add/sub/and/or/xor/exch/min/max` produce bare
+`atom.<op>` without ordering or scope qualifiers.
 
 **Workaround (fence splitting):** We emit explicit fences around the
 operation:
@@ -219,28 +242,33 @@ AcqRel example:
 ```
 
 **Fix:** PR [#176015](https://github.com/llvm/llvm-project/pull/176015)
-lands in **LLVM 23** (~mid-to-late 2026). Once available, fence splitting
-can be removed.
+landed in **LLVM 23**, which the pinned toolchain now ships: verified
+against the pinned llc-23, `atomicrmw ... syncscope("block") acq_rel`
+lowers to `atom.acq_rel.cta.global.add.u32` directly. Fence splitting is
+still emitted so the LLVM 21/22 floor keeps producing correctly ordered
+PTX; it can be removed when the supported-llc floor moves to 23.
 
-### Syncscopes work on everything except `atomicrmw`
+### Syncscopes work on everything except `atomicrmw` (fixed in LLVM 23)
 
-| Instruction    | llc-22 scope support             |
-|----------------|----------------------------------|
-| `load atomic`  | Yes (`.gpu`, `.cta`, `.sys`)     |
-| `store atomic` | Yes                              |
-| `cmpxchg`      | Yes                              |
-| `fence`        | Yes                              |
-| `atomicrmw`    | No (same bug as orderings)       |
+| Instruction    | llc-21/22 scope support          | llc-23 |
+|----------------|----------------------------------|--------|
+| `load atomic`  | Yes (`.gpu`, `.cta`, `.sys`)     | Yes    |
+| `store atomic` | Yes                              | Yes    |
+| `cmpxchg`      | Yes                              | Yes    |
+| `fence`        | Yes                              | Yes    |
+| `atomicrmw`    | No (same bug as orderings)       | Yes    |
 
-The fence-splitting workaround also fixes scope: the fences carry the
-correct syncscope even though the `atomicrmw` itself doesn't.
+The fence-splitting workaround also fixes scope on 21/22: the fences carry
+the correct syncscope even though the `atomicrmw` itself doesn't.
 
-**Note:** For `Relaxed` ordering (no fences emitted), the bare `atomicrmw`
-instruction loses its scope entirely. For example, `BlockAtomicU32::fetch_add`
-with `Relaxed` emits `atom.add.u32` (defaulting to `.gpu`) instead of
-`atom.cta.add.u32`. This is functionally correct (`.gpu` is a superset of
-`.cta`) but not optimal. Non-Relaxed orderings correctly emit scoped fences
-(e.g., `fence.acq_rel.cta`), as verified by test 19.
+**Note:** For `Relaxed` ordering (no fences emitted) on llc-21/22, the bare
+`atomicrmw` instruction loses its scope entirely. For example,
+`BlockAtomicU32::fetch_add` with `Relaxed` emits `atom.add.u32` (defaulting
+to `.gpu`) instead of `atom.cta.add.u32`. This is functionally correct
+(`.gpu` is a superset of `.cta`) but not optimal. The pinned llc-23 keeps
+the scope even on `Relaxed` (`atom.relaxed.cta.global.add.u32`). Non-Relaxed
+orderings correctly emit scoped fences (e.g., `fence.acq_rel.cta`), as
+verified by test 19.
 
 ### `fetch_sub` lowers to `atom.add ..., -N`
 
@@ -279,7 +307,7 @@ llc                                               ← PTX:
 
 | Error                                    | Cause                 | Solution                                           |
 |------------------------------------------|-----------------------|----------------------------------------------------|
-| Scope missing from PTX                   | Using llc-21 or older | Set `CUDA_OXIDE_LLC=/path/to/llc-22`               |
+| Scope missing from PTX                   | Using llc-21 or older | Set `CUDA_OXIDE_LLC=/path/to/llc-22` (or newer)    |
 | `PTX generation failed: llc not found`   | No LLVM installed     | `sudo apt install llvm-22` or set `CUDA_OXIDE_LLC` |
 | `CUDA_ERROR_NO_DEVICE`                   | No GPU available      | Ensure NVIDIA driver is installed                  |
 | `Failed to load PTX module`              | PTX file missing      | Run via `cargo oxide run atomics`                  |

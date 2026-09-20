@@ -176,7 +176,8 @@
 //! because rustc's MIR pretty-printer routinely emits `std::*` for items
 //! that are merely re-exported from `core`.
 //!
-//! See [`collector::should_collect_from_crate`] for the exact policy.
+//! See `DeviceCollector::should_collect_from_crate` in `collector` for the
+//! exact policy.
 //!
 //! ### Why `std::*` shows up in MIR dumps (and isn't a problem)
 //!
@@ -289,13 +290,17 @@
 //!
 //! ## Module Structure
 //!
-//! - [`collector`]: Device function collection via MIR call graph traversal
-//! - [`device_codegen`]: Bridge to the cuda-oxide pipeline (MIR → PTX)
-//! - [`layout`]: Unified type layouts for host/device ABI compatibility
+//! These are private implementation modules, so they are named rather than
+//! linked: rustdoc rejects a link from public crate documentation to a private
+//! item.
+//!
+//! - `collector`: Device function collection via MIR call graph traversal
+//! - `device_codegen`: Bridge to the cuda-oxide pipeline (MIR → PTX)
+//! - `generated_intrinsics`: Generated intrinsic definitions and dispatch
+//! - `materialize`: Strict, opt-in build-time finalization of embedded device
+//!   artifacts
 
 #![feature(rustc_private)]
-#![allow(unused_imports)]
-#![allow(dead_code)]
 
 // Import rustc internal crates
 extern crate rustc_abi;
@@ -327,17 +332,15 @@ mod materialize;
 
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_codegen_ssa::{CompiledModule, CompiledModules, CrateInfo, ModuleKind};
-use rustc_data_structures::fx::FxIndexMap;
 use rustc_metadata::EncodedMetadata;
-use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
+use rustc_middle::dep_graph::WorkProductMap;
 use rustc_middle::ty::TyCtxt;
 use rustc_middle::ty::print::with_no_trimmed_paths;
-use rustc_session::Session;
 use rustc_session::config::OutputFilenames;
+use rustc_session::{IncrCompSession, Session};
 use std::any::Any;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The CUDA codegen backend.
@@ -514,7 +517,7 @@ impl CodegenBackend for CudaCodegenBackend {
     ///       └──▶ 4. llvm_backend.codegen_crate(tcx)
     ///               Let LLVM handle ALL host code
     /// ```
-    fn codegen_crate(&self, tcx: TyCtxt<'_>, crate_info: &CrateInfo) -> Box<dyn Any> {
+    fn codegen_crate(&self, tcx: TyCtxt<'_>) -> Box<dyn Any> {
         // Wrap entire function in with_no_trimmed_paths! to prevent diagnostic state issues.
         // This is necessary because we use tcx.def_path_str() and other functions that
         // trigger trimmed_def_paths. rust-gpu uses the same pattern.
@@ -540,6 +543,21 @@ impl CodegenBackend for CudaCodegenBackend {
             let crate_name = tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
             let owner_selected = self.config.allows_device_codegen_for(crate_name.as_str());
             let contains_device_code = kernel_count > 0 || device_fn_count > 0;
+
+            // Kernel MIR is produced by this session for `--target`, so its
+            // pointer width and endianness flow into device code unchanged.
+            // PTX is 64-bit little-endian; refuse anything else the moment a
+            // crate has kernel code, instead of miscompiling every layout.
+            // Kernel-free crates keep going through the LLVM backend as before.
+            if contains_device_code
+                && let Err(reason) =
+                    host_target_supported(tcx.sess.target.pointer_width, tcx.sess.target.endian)
+            {
+                tcx.dcx().fatal(format!(
+                    "`--target {}` is not supported for crates with kernel code: {reason}",
+                    tcx.sess.opts.target_triple
+                ));
+            }
             let has_device_code = should_codegen_device_crate(
                 &self.config,
                 crate_name.as_str(),
@@ -724,6 +742,7 @@ impl CodegenBackend for CudaCodegenBackend {
                         }
                         if let Some(artifact) = result.artifact.as_ref() {
                             match write_device_artifact_object(
+                                tcx,
                                 &device_config.output_dir,
                                 &device_config.output_name,
                                 tcx.sess.target.llvm_target.as_ref(),
@@ -774,7 +793,7 @@ impl CodegenBackend for CudaCodegenBackend {
 
             // Step 3: Delegate ALL host codegen to LLVM backend
             // (No logging here - it fires for every crate including dependencies)
-            let host_result = self.llvm_backend.codegen_crate(tcx, crate_info);
+            let host_result = self.llvm_backend.codegen_crate(tcx);
 
             // Return the LLVM backend's result
             Box::new(CudaOngoingCodegen {
@@ -788,13 +807,20 @@ impl CodegenBackend for CudaCodegenBackend {
         &self,
         ongoing_codegen: Box<dyn Any>,
         sess: &Session,
+        incr_comp_session: Option<&IncrCompSession>,
         outputs: &OutputFilenames,
-    ) -> (CompiledModules, FxIndexMap<WorkProductId, WorkProduct>) {
+        crate_info: &CrateInfo,
+    ) -> (CompiledModules, WorkProductMap) {
         let ongoing = *ongoing_codegen
             .downcast::<CudaOngoingCodegen>()
             .expect("rustc_codegen_cuda received unexpected ongoing codegen state");
-        let (mut compiled_modules, work_products) =
-            self.llvm_backend.join_codegen(ongoing.host, sess, outputs);
+        let (mut compiled_modules, work_products) = self.llvm_backend.join_codegen(
+            ongoing.host,
+            sess,
+            incr_comp_session,
+            outputs,
+            crate_info,
+        );
         for (index, object) in ongoing.artifact_objects.into_iter().enumerate() {
             compiled_modules.modules.push(CompiledModule {
                 name: format!("oxide_artifact_embed_{index}"),
@@ -804,6 +830,7 @@ impl CodegenBackend for CudaCodegenBackend {
                 bytecode: None,
                 assembly: None,
                 llvm_ir: None,
+                global_asm_object: None,
                 links_from_incr_cache: Vec::new(),
             });
         }
@@ -825,6 +852,7 @@ impl CodegenBackend for CudaCodegenBackend {
 
 #[allow(clippy::too_many_arguments)]
 fn write_device_artifact_object(
+    tcx: TyCtxt<'_>,
     output_dir: &Path,
     output_name: &str,
     host_target: &str,
@@ -835,17 +863,17 @@ fn write_device_artifact_object(
     materialization_request: Option<materialize::MaterializationRequest>,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let bundle_name = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| output_name.to_string());
-    let materialized_artifact;
-    let (artifact, was_materialized) = match materialize_artifact_for_embedding(
+    let materialized_artifact = materialize_artifact_for_embedding(
         materialization_request,
         &bundle_name,
         result,
         artifact,
-    )? {
-        Some(cubin) => {
-            materialized_artifact = cubin;
-            (&materialized_artifact, true)
-        }
+    )?;
+    if let Some(materialized) = materialized_artifact.as_ref() {
+        emit_launch_bounds_spill_warnings(tcx, result, functions, &materialized.resource_usage);
+    }
+    let (artifact, was_materialized) = match materialized_artifact.as_ref() {
+        Some(materialized) => (&materialized.artifact, true),
         None => (artifact, false),
     };
     let payload_kind = match artifact.kind {
@@ -962,12 +990,17 @@ fn embedded_compile_options(
 /// produced NVVM IR or LTOIR; accepting PTX or an already-built cubin would
 /// bypass the wrapper's provenance-checked finalization recipe. See
 /// `materialize` for the trade-offs.
+struct MaterializedDeviceArtifact {
+    artifact: device_codegen::DeviceCodegenArtifact,
+    resource_usage: Vec<cuda_artifact_finalizer::KernelResourceUsage>,
+}
+
 fn materialize_artifact_for_embedding(
     request: Option<materialize::MaterializationRequest>,
     bundle_name: &str,
     result: &device_codegen::DeviceCodegenResult,
     artifact: &device_codegen::DeviceCodegenArtifact,
-) -> Result<Option<device_codegen::DeviceCodegenArtifact>, Box<dyn std::error::Error>> {
+) -> Result<Option<MaterializedDeviceArtifact>, Box<dyn std::error::Error>> {
     let Some(request) = request else {
         return Ok(None);
     };
@@ -1002,11 +1035,69 @@ fn materialize_artifact_for_embedding(
             return Err(Box::new(materialize::MaterializeError::CubinInput));
         }
     };
-    Ok(Some(device_codegen::DeviceCodegenArtifact {
-        kind: device_codegen::DeviceCodegenArtifactKind::Cubin,
-        name: format!("{bundle_name}.cubin"),
-        bytes: cubin,
+    Ok(Some(MaterializedDeviceArtifact {
+        artifact: device_codegen::DeviceCodegenArtifact {
+            kind: device_codegen::DeviceCodegenArtifactKind::Cubin,
+            name: format!("{bundle_name}.cubin"),
+            bytes: cubin.bytes,
+        },
+        resource_usage: cubin.resource_usage,
     }))
+}
+
+/// Warns on every `#[launch_bounds]` kernel whose ptxas resource report
+/// shows register spills, at the kernel's definition span.
+///
+/// Set `CUDA_OXIDE_NO_SPILL_WARN=1` to silence the warnings. They are raw
+/// span diagnostics, not lints, so `#[allow]` cannot suppress them; the
+/// escape hatch covers builds that measured a spill and accepted it.
+fn emit_launch_bounds_spill_warnings(
+    tcx: TyCtxt<'_>,
+    result: &device_codegen::DeviceCodegenResult,
+    functions: &[collector::CollectedFunction<'_>],
+    resource_usage: &[cuda_artifact_finalizer::KernelResourceUsage],
+) {
+    if std::env::var_os("CUDA_OXIDE_NO_SPILL_WARN").is_some() {
+        return;
+    }
+    for usage in resource_usage.iter().filter(|usage| usage.has_spills()) {
+        let Some(bounds) = result.kernel_launch_bounds.get(&usage.kernel) else {
+            continue;
+        };
+        let Some(function) = functions
+            .iter()
+            .find(|function| function.is_kernel && function.export_name == usage.kernel)
+        else {
+            continue;
+        };
+
+        let launch_bounds = match bounds.min_blocks {
+            Some(min_blocks) => {
+                format!("#[launch_bounds({}, {})]", bounds.max_threads, min_blocks)
+            }
+            None => format!("#[launch_bounds({})]", bounds.max_threads),
+        };
+        let mut diagnostic = tcx.dcx().struct_span_warn(
+            tcx.def_span(function.instance.def_id()),
+            format!(
+                "kernel `{}` compiled with `{launch_bounds}` and spills registers",
+                usage.kernel
+            ),
+        );
+        diagnostic.note(format!(
+            "ptxas reports {} bytes spill stores and {} bytes spill loads",
+            usage.spill_store_bytes, usage.spill_load_bytes
+        ));
+        if let Some(registers) = usage.registers {
+            diagnostic.note(format!("ptxas allocated {registers} registers per thread"));
+        }
+        if bounds.min_blocks.is_some() {
+            diagnostic.help("relax `min_blocks_per_sm` or reduce register pressure");
+        } else {
+            diagnostic.help("relax the launch bound or reduce register pressure");
+        }
+        diagnostic.emit();
+    }
 }
 
 fn write_filtered_artifact_anchor_object(
@@ -1095,9 +1186,55 @@ pub fn __rustc_codegen_backend() -> Box<dyn CodegenBackend> {
     })
 }
 
+/// Checks that the host target can stand in for the device's data model.
+///
+/// cuda-oxide runs one rustc session for the host target and diverts
+/// kernel-reachable MIR into the device pipeline, so `usize` width, every
+/// pointer-sized field offset, and byte order in kernel code are the host's.
+/// PTX is 64-bit and little-endian. A 32-bit or big-endian host would
+/// produce kernel layouts that disagree with the GPU on every struct, so it
+/// is refused before any crate is compiled.
+pub(crate) fn host_target_supported(
+    pointer_width: u16,
+    endian: rustc_abi::Endian,
+) -> Result<(), String> {
+    if pointer_width != 64 {
+        return Err(format!(
+            "kernels inherit the target's {pointer_width}-bit pointer width, but PTX is 64-bit; \
+             build for a 64-bit little-endian host"
+        ));
+    }
+    if endian != rustc_abi::Endian::Little {
+        return Err(
+            "kernels inherit the target's big-endian byte order, but PTX is little-endian; \
+             build for a 64-bit little-endian host"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_targets_that_match_the_ptx_data_model_are_accepted() {
+        use rustc_abi::Endian;
+        assert_eq!(host_target_supported(64, Endian::Little), Ok(()));
+    }
+
+    #[test]
+    fn hosts_with_a_different_pointer_width_or_byte_order_are_refused() {
+        use rustc_abi::Endian;
+        let narrow = host_target_supported(32, Endian::Little).unwrap_err();
+        assert!(narrow.contains("32-bit pointer width"), "{narrow}");
+        let big = host_target_supported(64, Endian::Big).unwrap_err();
+        assert!(big.contains("big-endian"), "{big}");
+        // Width is reported first when both are wrong.
+        let both = host_target_supported(32, Endian::Big).unwrap_err();
+        assert!(both.contains("32-bit"), "{both}");
+    }
 
     #[test]
     fn device_codegen_owner_filter_normalizes_and_matches_crate_names() {

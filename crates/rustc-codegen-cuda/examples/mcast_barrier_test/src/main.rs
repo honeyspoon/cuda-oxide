@@ -13,12 +13,14 @@
 //! Build and run:
 //!   cargo oxide run mcast_barrier_test
 
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, DeviceBuffer};
 use cuda_device::barrier::{
     Barrier, fence_proxy_async_shared_cta, mbarrier_arrive_cluster, mbarrier_init,
     mbarrier_try_wait_parity, nanosleep,
 };
 use cuda_device::cluster;
+use cuda_device::shared::cvta_generic_to_shared_offset;
 use cuda_device::{DisjointSlice, cluster_launch, kernel, thread};
 use cuda_host::cuda_module;
 
@@ -48,8 +50,14 @@ mod kernels {
             }
             thread::sync_threads();
 
-            let rank0_bar0_addr = cluster::map_shared_rank(&raw const MCAST_BAR0, 0) as u64;
-            let rank0_bar1_addr = cluster::map_shared_rank(&raw const MCAST_BAR1, 0) as u64;
+            let rank0_bar0_addr = cvta_generic_to_shared_offset(cluster::map_shared_rank(
+                &raw const MCAST_BAR0,
+                0,
+            ) as *const u8);
+            let rank0_bar1_addr = cvta_generic_to_shared_offset(cluster::map_shared_rank(
+                &raw const MCAST_BAR1,
+                0,
+            ) as *const u8);
 
             let is_rank0 = my_rank == 0;
 
@@ -110,15 +118,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== MCAST Barrier Protocol Test ===\n");
 
     let ctx = CudaContext::new(0)?;
+
+    // Cluster-scoped mbarrier arrival and multicast need sm_90 (Hopper) or
+    // later.
+    let (major, minor) = ctx.compute_capability()?;
+    if major < 9 {
+        println!("skipping: cluster mbarrier requires sm_90+ (device is sm_{major}{minor})");
+        return Ok(());
+    }
+
     let stream = ctx.default_stream();
 
-    let ptx_path =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mcast_barrier_test.ptx");
-    println!("Loading PTX: {}", ptx_path.display());
-    let module =
-        ctx.load_module_from_file(ptx_path.to_str().ok_or("PTX path must be valid UTF-8")?)?;
-    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
-    println!("PTX loaded\n");
+    let module = kernels::load(&ctx)?;
+    println!("Embedded CUDA module loaded\n");
 
     for &num_iters in &[4u32, 8, 16, 32, 64, 256, 1024] {
         print!("  {} iters ... ", num_iters);

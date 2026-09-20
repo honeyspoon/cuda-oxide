@@ -10,10 +10,12 @@ use rustc_hash::FxHashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::ops::{DebugLocalTypeKind, DebugLocalVariableInfo, DebugSourceScopeMap};
+use crate::ops::{
+    DebugGlobalVariableInfo, DebugLocalTypeKind, DebugLocalVariableInfo, DebugSourceScopeMap,
+};
 
 use super::{
-    config::{DebugKind, NvvmIrDialect},
+    config::{DebugKind, FunctionLocalStaticPlacement, NvvmIrDialect},
     externs::DeviceExternDecl,
 };
 
@@ -60,10 +62,46 @@ pub(super) struct KernelInfo {
     pub(super) name: String,
 }
 
+/// One direct aggregate argument/return whose source ABI alignment exceeds
+/// the natural alignment representable by its LLVM type.
+///
+/// NVVM's `align` function property numbers the return as position 0 and
+/// arguments from 1.
+pub(super) struct FunctionAbiAlignment {
+    pub(super) name: String,
+    pub(super) position: u16,
+    pub(super) alignment: u16,
+}
+
+/// Kernel parameters whose by-value storage remains in kernel parameter space
+/// and is shared by the whole grid. NVVM numbers parameters from one.
+pub(super) struct KernelGridConstants {
+    pub(super) name: String,
+    pub(super) positions: Vec<u32>,
+}
+
+/// The by-value storage type is part of a kernel's ABI even though the
+/// compiler's pointer type deliberately erases pointees. Retain it before
+/// exporting any body so forward references see the same signature.
+#[derive(Clone, Copy)]
+pub(super) struct GridConstantParameter {
+    pub(super) index: usize,
+    pub(super) pointee: TypeHandle,
+    pub(super) alignment: u64,
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct GlobalSymbolInfo {
     pub(super) value_type: TypeHandle,
     pub(super) address_space: u32,
+}
+
+#[derive(Clone)]
+pub(super) struct GlobalSourceInfo {
+    pub(super) symbol: String,
+    pub(super) value_type: TypeHandle,
+    pub(super) address_space: u32,
+    pub(super) initializer_size: Option<u64>,
 }
 
 pub(super) struct ModuleExportState<'a> {
@@ -76,6 +114,11 @@ pub(super) struct ModuleExportState<'a> {
     pub(super) launch_bounds_kernels: Vec<KernelLaunchBounds>,
     /// Track ALL kernels (for backends that require annotations for every kernel)
     pub(super) all_kernels: Vec<KernelInfo>,
+    /// Direct aggregate argument/return alignments that LLVM structural types
+    /// cannot encode and NVVM therefore requires as `"align"` annotations.
+    pub(super) function_abi_alignments: Vec<FunctionAbiAlignment>,
+    /// Parameters carrying LLVM `byval` plus NVVM `grid_constant` semantics.
+    pub(super) grid_constant_kernels: Vec<KernelGridConstants>,
     /// Whether to print `ptx_kernel` on kernel definitions.
     pub(super) emit_ptx_kernel_keyword: bool,
     /// Track device function names for @llvm.used (standalone device fn compilation)
@@ -83,8 +126,12 @@ pub(super) struct ModuleExportState<'a> {
     /// Defined globals retain external linkage because CUDA host code can
     /// resolve them by name (for example through `cuModuleGetGlobal`).
     pub(super) public_globals: Vec<String>,
+    /// Globals explicitly consumed outside device code and therefore rooted in
+    /// `@llvm.used` so materialization cannot discard them.
+    pub(super) retained_globals: Vec<String>,
     /// Emitted function signatures keyed by their final, prefix-stripped name.
     pub(super) function_types: FxHashMap<String, TypeHandle>,
+    pub(super) function_grid_constants: FxHashMap<String, Vec<GridConstantParameter>>,
     /// Original pliron symbol spelling for each final exported function name.
     /// Device-extern declarations can only suppress an exact-name declaration;
     /// a prefixed alias would otherwise emit a second definition/declaration.
@@ -99,6 +146,11 @@ pub(super) struct ModuleExportState<'a> {
     /// Global value types/address spaces, indexed before any function body is
     /// emitted so `addressof` is independent of top-level textual order.
     pub(super) global_symbols: FxHashMap<String, GlobalSymbolInfo>,
+    /// Device globals indexed by their stable rustc source key.
+    ///
+    /// Relocation metadata refers to this key because ordinary globals receive
+    /// generated LLVM symbol names during MIR lowering.
+    pub(super) global_sources: FxHashMap<String, GlobalSourceInfo>,
     /// Next `!N` metadata ID in this module.
     ///
     /// LLVM has one flat numbered metadata namespace per module. Today this is
@@ -107,6 +159,8 @@ pub(super) struct ModuleExportState<'a> {
     next_metadata_id: usize,
     /// Which debug metadata tier this export should emit.
     pub(super) debug_kind: DebugKind,
+    /// Where function-local statics are retained (per the consuming LLVM).
+    pub(super) debug_function_local_static_placement: FunctionLocalStaticPlacement,
     /// NVVM textual dialect, or `None` for the ordinary PTX/llc path.
     pub(super) nvvm_ir_dialect: Option<NvvmIrDialect>,
     /// The single compile unit used for Stage 2 line-table debug info.
@@ -117,6 +171,12 @@ pub(super) struct ModuleExportState<'a> {
     pub(super) debug_subroutine_type: Option<usize>,
     /// `DISubprogram` file paths, used to create file-correct nested scopes.
     pub(super) debug_subprogram_files: FxHashMap<usize, PathBuf>,
+    /// The one real `DISubprogram` allocated for each exported function name.
+    /// AS3 globals are emitted before functions, so their owners are reserved
+    /// in a module prepass and reused when the definition is written.
+    pub(super) debug_function_subprograms: FxHashMap<String, usize>,
+    /// Source scope for functions that own function-local shared statics.
+    pub(super) debug_shared_function_scopes: FxHashMap<String, DebugSharedFunctionScope>,
     /// Fallback line/column for calls that LLVM requires to have a location.
     pub(super) debug_subprogram_fallbacks: FxHashMap<usize, (i32, i32)>,
     /// `DILexicalBlockFile` nodes keyed by `(parent scope, file path)`.
@@ -133,6 +193,20 @@ pub(super) struct ModuleExportState<'a> {
     pub(super) debug_locations: FxHashMap<(usize, i32, i32, Option<usize>), usize>,
     /// `DIType` nodes keyed by the simple debug type they describe.
     pub(super) debug_types: FxHashMap<DebugLocalTypeKind, usize>,
+    /// Uniqued nested `DINamespace` nodes, keyed by parent scope and segment.
+    pub(super) debug_namespaces: FxHashMap<(Option<usize>, String), usize>,
+    /// Global expressions already created for a physical linkage name.
+    /// A repeated linkage must carry the exact same source identity.
+    pub(super) debug_global_variables:
+        FxHashMap<String, (DebugGlobalVariableInfo, u32, Option<String>, usize)>,
+    /// Module globals retained by the compile unit.
+    pub(super) debug_global_expressions: Vec<usize>,
+    /// Function-local static expressions retained by their owning
+    /// `DISubprogram` (keyed by its metadata id), under the
+    /// [`FunctionLocalStaticPlacement::SubprogramRetainedNodes`] placement.
+    pub(super) debug_subprogram_retained_globals: FxHashMap<usize, Vec<usize>>,
+    /// Whether the compile unit's immutable globals tuple has been finalized.
+    pub(super) debug_globals_finalized: bool,
     /// `DILocalVariable` nodes keyed by scope, source line, and local identity.
     pub(super) debug_local_variables:
         FxHashMap<(usize, PathBuf, i32, DebugLocalVariableInfo), usize>,
@@ -150,12 +224,19 @@ pub(super) struct ResolvedDebugScope {
     pub(super) inlined_at: Option<usize>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct DebugSharedFunctionScope {
+    pub(super) namespace: Vec<String>,
+    pub(super) name: String,
+}
+
 impl<'a> ModuleExportState<'a> {
     pub(super) fn new(
         ctx: &'a pliron::context::Context,
         emit_ptx_kernel_keyword: bool,
         debug_kind: DebugKind,
         nvvm_ir_dialect: Option<NvvmIrDialect>,
+        debug_function_local_static_placement: FunctionLocalStaticPlacement,
     ) -> Self {
         Self {
             ctx,
@@ -163,21 +244,29 @@ impl<'a> ModuleExportState<'a> {
             cluster_kernels: Vec::new(),
             launch_bounds_kernels: Vec::new(),
             all_kernels: Vec::new(),
+            function_abi_alignments: Vec::new(),
+            grid_constant_kernels: Vec::new(),
             emit_ptx_kernel_keyword,
             device_functions: Vec::new(),
             public_globals: Vec::new(),
+            retained_globals: Vec::new(),
             function_types: FxHashMap::default(),
+            function_grid_constants: FxHashMap::default(),
             function_source_names: FxHashMap::default(),
             function_definitions: HashSet::new(),
             device_externs: FxHashMap::default(),
             global_symbols: FxHashMap::default(),
+            global_sources: FxHashMap::default(),
             next_metadata_id: 0,
             debug_kind,
+            debug_function_local_static_placement,
             nvvm_ir_dialect,
             debug_compile_unit: None,
             debug_files: FxHashMap::default(),
             debug_subroutine_type: None,
             debug_subprogram_files: FxHashMap::default(),
+            debug_function_subprograms: FxHashMap::default(),
+            debug_shared_function_scopes: FxHashMap::default(),
             debug_subprogram_fallbacks: FxHashMap::default(),
             debug_file_scopes: FxHashMap::default(),
             debug_lexical_blocks: FxHashMap::default(),
@@ -186,6 +275,11 @@ impl<'a> ModuleExportState<'a> {
             debug_resolved_source_scopes: FxHashMap::default(),
             debug_locations: FxHashMap::default(),
             debug_types: FxHashMap::default(),
+            debug_namespaces: FxHashMap::default(),
+            debug_global_variables: FxHashMap::default(),
+            debug_global_expressions: Vec::new(),
+            debug_subprogram_retained_globals: FxHashMap::default(),
+            debug_globals_finalized: false,
             debug_local_variables: FxHashMap::default(),
             debug_nodes: Vec::new(),
             debug_declare_used: false,
@@ -246,6 +340,11 @@ impl<'a> ModuleExportState<'a> {
             || name.starts_with("llvm.nvvm.redux")
             // Async bulk operations (TMA)
             || name.starts_with("llvm.nvvm.cp.async.bulk")
+            // Warpgroup register reconfiguration
+            // (setmaxnreg.{inc,dec}.sync.aligned.u32): all warps of the
+            // warpgroup must execute it together, so it is convergent and
+            // side-effecting and must not be sunk into divergent branches.
+            || name.starts_with("llvm.nvvm.setmaxnreg")
     }
 }
 
@@ -309,6 +408,42 @@ mod tests {
             assert!(
                 !ModuleExportState::is_convergent_intrinsic(name),
                 "{name} should not be flagged convergent"
+            );
+        }
+    }
+
+    #[test]
+    fn setmaxnreg_is_convergent() {
+        // `setmaxnreg.{inc,dec}.sync.aligned.u32` reconfigures the register
+        // file for the whole warpgroup; every warp must execute it together,
+        // so the exported declaration must carry `convergent`.
+        for name in [
+            "llvm.nvvm.setmaxnreg.inc.sync.aligned.u32",
+            "llvm.nvvm.setmaxnreg.dec.sync.aligned.u32",
+        ] {
+            assert!(
+                ModuleExportState::is_convergent_intrinsic(name),
+                "{name} should be flagged convergent"
+            );
+        }
+    }
+
+    #[test]
+    fn counted_cta_barriers_are_convergent() {
+        // The counted CTA barrier family (barrier.cta.{sync,arrive} with a
+        // thread count, aligned or not) is covered by the `llvm.nvvm.barrier`
+        // prefix; this checks that coverage against the exact names the
+        // generated lowerings produce.
+        for name in [
+            "llvm.nvvm.barrier.cta.sync.count",
+            "llvm.nvvm.barrier.cta.sync.aligned.count",
+            "llvm.nvvm.barrier.cta.arrive.count",
+            "llvm.nvvm.barrier.cta.arrive.aligned.count",
+            "llvm.nvvm.barrier.cta.sync.aligned.all",
+        ] {
+            assert!(
+                ModuleExportState::is_convergent_intrinsic(name),
+                "{name} should be flagged convergent"
             );
         }
     }

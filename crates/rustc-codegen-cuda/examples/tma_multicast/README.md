@@ -1,6 +1,6 @@
 # tma_multicast
 
-## TMA Multicast — Blackwell Datacenter (sm_100a) Cluster Broadcast
+## TMA Multicast Cluster Broadcast
 
 Demonstrates TMA multicast: a single `cp.async.bulk.tensor` load broadcasts a
 tile from global memory into the shared memory of **every CTA** in a thread
@@ -69,7 +69,7 @@ The `cta_mask` is a bitmask over cluster ranks. With a `(4,1,1)` cluster:
 ## Generated PTX
 
 ```ptx
-.target sm_100a
+.target sm_120a          // follows the detected GPU; see "Which GPUs Run This?"
 .explicitcluster
 .reqnctapercluster 4, 1, 1
 
@@ -92,14 +92,16 @@ cargo oxide run tma_multicast
 
 ## Expected Output
 
-### On Blackwell Datacenter (sm_100a):
+### On Blackwell Datacenter (sm_100)
+
+`cargo oxide run` builds `.target sm_100a` for a B100/B200/GB200 and the
+module loads and runs:
 
 ```text
-=== TMA Multicast Example (sm_100a) ===
+=== TMA Multicast Example ===
 
 GPU Compute Capability: sm_100
-Loading PTX from: tma_multicast.ptx
-✓ PTX loaded successfully
+✓ embedded module loaded successfully
 
 --- TMA Multicast (tma_multicast_test) ---
 
@@ -113,22 +115,46 @@ Loading PTX from: tma_multicast.ptx
 === TMA Multicast Test Complete ===
 ```
 
-### On Consumer Blackwell (sm_120) or Hopper (sm_90):
+### On Consumer Blackwell (sm_120)
+
+`cargo oxide run` builds `.target sm_120a` for an RTX 5090 (first verified
+in #668). Transcript captured on an RTX 5090:
 
 ```text
+=== TMA Multicast Example ===
+
 GPU Compute Capability: sm_120
+✓ embedded module loaded successfully
 
-✗ PTX load failed: DriverError(CUDA_ERROR_INVALID_PTX, ...)
+--- TMA Multicast (tma_multicast_test) ---
 
-  TMA multicast requires sm_100a (Blackwell datacenter: B100/B200/GB200).
-  Consumer Blackwell (sm_120) does NOT support multicast.
-  For basic TMA tests, use: cargo oxide run tma_copy
+1. Setup: 4 CTAs in cluster, tile 64x64 (4096 floats)
+2. Launching tma_multicast_test (cluster=(4,1,1), block=256)...
+3. Verifying all 4 CTAs received the same tile...
+   ✓ All 4 CTAs have identical tile data (4096 values each)!
+
+🎉 TMA multicast successful — one load, 4 CTAs served!
+
+=== TMA Multicast Test Complete ===
 ```
+
+### On Hopper (sm_90/sm_90a)
+
+Multicast is sm_90+ in the PTX ISA, and `cargo oxide run` on an H100 builds
+`.target sm_90a`, so the module is expected to load and execute there. That
+run is not yet captured; #966 tracks it.
+
+The host gate is `major < 9`, the same floor as `tma_copy`. Below sm_90 the
+example prints `skipping: TMA multicast requires sm_90 or newer` and exits
+cleanly.
 
 ## Hardware Requirements
 
-- **Architecture**: sm_100a — Blackwell datacenter (B100, B200, GB200)
-- **NOT supported**: Consumer Blackwell (sm_120), Hopper (sm_90/sm_90a)
+- **Multicast floor**: sm_90 or newer (PTX ISA). Verified on consumer
+  Blackwell sm_120 (RTX 5090, #668); Hopper sm_90a run not yet captured (#966)
+- **Build target**: `cargo oxide run` builds for the detected GPU; there is
+  no fixed target baked into the example (see "Which GPUs Run This?")
+- **Not supported**: anything below sm_90
 - **CUDA Driver**: 12.0+
 - **Cluster launch**: Required (`cuLaunchKernelEx` with cluster dimensions)
 
@@ -138,7 +164,7 @@ GPU Compute Capability: sm_120
 |---------------------|----------------------------------|-------------------------------------|
 | Destination         | One CTA's shared memory          | All CTAs in cluster                 |
 | Bandwidth           | 1x tile transfer                 | 1x transfer, N copies               |
-| Architecture        | sm_90+ (Hopper+)                 | sm_100a (Blackwell datacenter)      |
+| Architecture        | sm_90+ (Hopper+)                 | sm_90+ (Hopper+), seen on sm_120    |
 | Use case            | Single-CTA tile loads            | GEMM/convolution with shared tiles  |
 | `cluster_launch`    | Optional                         | Required                            |
 
@@ -155,10 +181,25 @@ writes to every CTA's shared memory and signals every CTA's mbarrier. If any
 CTA hasn't finished `mbarrier_init` + `fence_proxy_async_shared_cta` before
 the multicast fires, the barrier tracking will be silently corrupt.
 
-## Why sm_100a Only?
+## Which GPUs Run This?
 
-The `a` suffix in `sm_100a` denotes architecture-specific extensions that are
-**not forward-compatible**. TMA multicast uses the L2 multicast fabric present
-only in datacenter Blackwell GPUs. Consumer Blackwell (sm_120) has the same
-base ISA (sm_100) but lacks this fabric, so `sm_100a` PTX cannot be JIT-compiled
-on sm_120.
+There is no fixed `.target` in this example. `cargo oxide run` forwards the
+detected GPU as a hint (`CUDA_OXIDE_DEVICE_ARCH`, `sm_XYa` form for cc >= 9),
+and rustc-codegen-cuda builds for that GPU whenever the kernel's features run
+on it. sm_100a is only the fallback when no compatible GPU is detected:
+
+```text
+cargo oxide run on an RTX 5090 -> hint sm_120a -> .target sm_120a -> loads, runs
+cargo oxide run on an H100     -> hint sm_90a  -> .target sm_90a  -> expected to run (#966)
+no compatible GPU detected     -> no hint      -> .target sm_100a (fallback)
+  (cargo oxide build, or run on a pre-Hopper GPU)
+```
+
+The host binary cannot see which target it embeds. If a module built on
+another machine, or with `--arch`, does not JIT on the local GPU, the
+load-failure arm prints the driver error and a `skipping:` line rather than
+guessing at a target.
+
+The multicast instruction itself has an sm_90+ floor in the intrinsic catalog,
+which matches the PTX ISA: `sm_90a` is advised there for performance, not
+required for legality. The host gate is therefore sm_90, not sm_100.

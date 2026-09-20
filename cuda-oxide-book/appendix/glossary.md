@@ -38,9 +38,11 @@ alongside the normal host binary.
 
 ## `cuda-async`
 
-The async execution layer. Provides `DeviceOperation` (lazy GPU work
-description), `DeviceFuture` (stream-bound execution), and `DeviceBox<T>`
-(device-owned memory). Compose work with `zip!`, `and_then`, and `value()`.
+The async execution layer, a crate shared with cutile-rs and published from
+NVlabs/cutile-rs. The cuda-oxide model lives under `cuda_async::simt`:
+`DeviceOperation` (lazy GPU work description), `DeviceFuture` (stream-bound
+execution), and `DeviceBox<T>` (device-owned memory). Compose work with
+`zip!`, `and_then`, and `value()`.
 
 ## `cuda-device`
 
@@ -52,7 +54,9 @@ cores, atomics, and debug facilities.
 
 Safe RAII wrappers around the CUDA Driver API: `CudaContext`, `CudaStream`,
 `DeviceBuffer<T>`, and module loading. Handles GPU context and memory management
-on the host side.
+on the host side. Shared with cutile-rs and published from NVlabs/cutile-rs;
+the cuda-oxide surface is re-exported at the crate root except
+`simt::LaunchConfig`, `simt::vmm`, `simt::peer`, and `simt::memory`.
 
 ## `DeviceOperation`
 
@@ -169,10 +173,12 @@ functions. Three forms:
   row stride is a const generic, so a `DisjointSlice<T, Index2D<S>>`
   only accepts a witness with the matching `S` -- mixing strides is a
   type error.
-- `unsafe thread::index_2d_runtime(s) -> Option<ThreadIndex<'_, Runtime2DIndex>>`.
-  Escape hatch when the stride is only known at launch time. The
-  `unsafe` is the contract: every thread feeding a `Runtime2DIndex`
-  into the same `DisjointSlice` must have used the same `s`.
+- `thread::index_2d_runtime(&slice) -> Option<ThreadIndex<'_, Runtime2DIndex>>`.
+  For strides only known at launch time, and safe: the row width lives
+  in the slice, written once by the host into the launch packet. The
+  witness stores the thread's `(row, col)` coordinates, and the slice
+  being addressed resolves them against its own width, so every thread
+  indexing one slice uses the same row width by construction.
 
 The witness is `!Send + !Sync + !Copy + !Clone` and `'kernel`-scoped, so
 threads cannot launder it through shared memory and it cannot outlive

@@ -1,13 +1,20 @@
 # The cuda-oxide Book
 
-```{image} _static/images/logo.png
-:alt: cuda-oxide logo
+```{image} _static/images/banner-light.png
+:alt: cuda-oxide: write CUDA (SIMT) kernels in pure Rust
 :align: center
-:width: 780px
-:class: mb-4
+:width: 640px
+:class: only-light mb-4
 ```
 
-**cuda-oxide** is an experimental Rust-to-CUDA compiler that lets you write (SIMT) GPU kernels in safe(ish), idiomatic Rust. It compiles standard Rust code directly to PTX — no DSLs, no foreign language bindings, just Rust.
+```{image} _static/images/banner-dark.png
+:alt: cuda-oxide: write CUDA (SIMT) kernels in pure Rust
+:align: center
+:width: 640px
+:class: only-dark mb-4
+```
+
+**cuda-oxide** is a Rust-to-CUDA compiler that lets you write (SIMT) GPU kernels in safe(ish), idiomatic Rust. It compiles standard Rust code directly to PTX — no DSLs, no foreign language bindings, just Rust.
 
 :::{note}
 This book assumes familiarity with the Rust programming language, including ownership, traits, and generics. Later chapters on async GPU programming also assume working knowledge of `async`/`.await` and runtimes like tokio.
@@ -26,9 +33,9 @@ The v0.1.0 release is an early-stage alpha: **expect bugs, incomplete features, 
 ## 🚀 Quick start
 
 ```rust
-use cuda_device::{kernel, launch_bounds, launch_contract, thread, DisjointSlice};
-use cuda_host::cuda_module;
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig1D};
+use cuda_device::{DisjointSlice, kernel, launch_bounds, launch_contract, thread};
+use cuda_host::cuda_module;
 
 #[cuda_module]
 mod kernels {
@@ -150,6 +157,7 @@ async-programming/the-device-operation-model
 async-programming/combinators-and-composition
 async-programming/scheduling-and-streams
 async-programming/concurrent-execution
+async-programming/overlapping-transfers-and-compute
 ```
 
 ```{toctree}
@@ -186,6 +194,7 @@ compiler/compiler-optimizations
 compiler/mlir-dialects
 compiler/lowering-pipeline
 compiler/adding-new-intrinsics
+compiler/catalog-generated-intrinsics
 compiler/fuzzing-and-differential-testing
 ```
 

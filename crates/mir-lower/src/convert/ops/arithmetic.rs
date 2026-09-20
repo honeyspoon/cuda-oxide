@@ -29,6 +29,8 @@
 
 use crate::convert::intrinsics::common::call_intrinsic;
 use crate::convert::types::convert_type;
+use crate::convert::types::{StructLayoutInfo, build_struct_slot_map};
+use dialect_mir::types::MirTupleType;
 use llvm_export::attributes::{
     FCmpPredicateAttr, FastmathFlags, FastmathFlagsAttr, ICmpPredicateAttr,
     IntegerOverflowFlagsAttr,
@@ -355,16 +357,66 @@ fn convert_checked_binop_with_intrinsic(
         .deref(ctx)
         .downcast_ref::<IntegerType>()
         .map(|t| t.width())
-        .ok_or_else(|| pliron::input_error!(loc, "checked binop: lhs must be an integer type"))?;
+        .ok_or_else(|| {
+            pliron::input_error!(loc.clone(), "checked binop: lhs must be an integer type")
+        })?;
 
     // Pliron identifiers use underscores; llvm-export converts to dots on output.
     let intrinsic_name = format!("llvm_{op_name}_with_overflow_i{width}");
 
     let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless);
-    let struct_ty = llvm_types::StructType::get_unnamed(ctx, vec![lhs_ty, i1_ty.into()]);
+    let struct_ty = llvm_types::StructType::get_unnamed(
+        ctx,
+        (
+            vec![lhs_ty, i1_ty.into()],
+            llvm_types::StructLayout::Unpacked,
+        ),
+    );
     let func_ty = llvm_types::FuncType::get(ctx, struct_ty.into(), vec![lhs_ty, lhs_ty], false);
 
     let call_op = call_intrinsic(ctx, rewriter, op, &intrinsic_name, func_ty, vec![lhs, rhs])?;
+
+    // The overflow intrinsic returns the bare `{iN, i1}` pair, but the type
+    // converter lowers the MIR `(T, bool)` result tuple with rustc's exact
+    // layout, including explicit `[N x i8]` tail-padding slots. Every other
+    // consumer of the tuple (block arguments, stores, field indexing, the
+    // block-arg scalarizer) uses the converted form, so re-pack the
+    // intrinsic's result into it whenever the two differ. This mismatch was
+    // latent until nightly-2026-08-28, whose `RangeInclusive` iterator MIR
+    // forwards a checked-op tuple through a block argument, where the
+    // scalarizer indexes the padded form into the unpadded value.
+    let result_tuple_ty = op.deref(ctx).get_result(0).get_type(ctx);
+    let layout = {
+        let ty_ref = result_tuple_ty.deref(ctx);
+        ty_ref
+            .downcast_ref::<MirTupleType>()
+            .map(StructLayoutInfo::of_tuple)
+    };
+    if let Some(layout) = layout {
+        let map = build_struct_slot_map(ctx, &layout)
+            .map_err(|e| pliron::input_error!(loc.clone(), "{e}"))?;
+        if map.llvm_struct_ty != struct_ty.into() {
+            let call_result = call_op.deref(ctx).get_result(0);
+            let undef_op = llvm::UndefOp::new(ctx, map.llvm_struct_ty);
+            rewriter.insert_operation(ctx, undef_op.get_operation());
+            let mut repacked = undef_op.get_operation().deref(ctx).get_result(0);
+            let mut last_op = undef_op.get_operation();
+            for (pair_idx, slot) in map.decl_to_llvm.iter().enumerate().take(2) {
+                let Some(slot) = slot else { continue };
+                let extract_op =
+                    llvm::ExtractValueOp::new(ctx, call_result, vec![pair_idx as u32])?;
+                rewriter.insert_operation(ctx, extract_op.get_operation());
+                let extracted = extract_op.get_operation().deref(ctx).get_result(0);
+                let insert_op = llvm::InsertValueOp::new(ctx, repacked, extracted, vec![*slot]);
+                rewriter.insert_operation(ctx, insert_op.get_operation());
+                repacked = insert_op.get_operation().deref(ctx).get_result(0);
+                last_op = insert_op.get_operation();
+            }
+            rewriter.replace_operation(ctx, op, last_op);
+            return Ok(());
+        }
+    }
+
     rewriter.replace_operation(ctx, op, call_op);
     Ok(())
 }
@@ -494,7 +546,7 @@ fn mask_shift_amount(
             NonZeroUsize::new(lhs_width as usize).unwrap(),
         ),
     );
-    let mask_op = llvm::ConstantOp::new(ctx, mask_attr.into());
+    let mask_op = llvm::ConstantOp::new(ctx, Box::new(mask_attr));
     rewriter.insert_operation(ctx, mask_op.get_operation());
     let mask_value = mask_op.get_operation().deref(ctx).get_result(0);
 
@@ -587,7 +639,7 @@ pub(crate) fn convert_neg(
             zero_ty,
             APInt::from_u128(0, NonZeroUsize::new(width as usize).unwrap()),
         );
-        let zero_op = llvm::ConstantOp::new(ctx, zero_attr.into()).get_operation();
+        let zero_op = llvm::ConstantOp::new(ctx, Box::new(zero_attr)).get_operation();
         rewriter.insert_operation(ctx, zero_op);
         let zero = zero_op.deref(ctx).get_result(0);
 
@@ -629,7 +681,7 @@ pub(crate) fn convert_not(
     let llvm_ty = IntegerType::get(ctx, width, Signedness::Signless);
     let apint = APInt::from_i64(-1, NonZeroUsize::new(width as usize).unwrap());
     let attr = pliron::builtin::attributes::IntegerAttr::new(llvm_ty, apint);
-    let ones_const = llvm::ConstantOp::new(ctx, attr.into()).get_operation();
+    let ones_const = llvm::ConstantOp::new(ctx, Box::new(attr)).get_operation();
     rewriter.insert_operation(ctx, ones_const);
     let ones_val = ones_const.deref(ctx).get_result(0);
 
@@ -806,12 +858,13 @@ fn emit_discriminant_const(
         signless_ty,
         APInt::from_u64(value, NonZeroUsize::new(width as usize).unwrap()),
     );
-    let const_op = llvm::ConstantOp::new(ctx, attr.into()).get_operation();
+    let const_op = llvm::ConstantOp::new(ctx, Box::new(attr)).get_operation();
     rewriter.insert_operation(ctx, const_op);
     Ok(const_op.deref(ctx).get_result(0))
 }
 
-// Conversion coverage: `tests/lowering_test.rs::test_cmp_predicate_lowering`
+// Conversion coverage: `test_cmp_predicate_lowering` in
+// `tests/lowering_test/calls_and_values.rs`
 // locks the comparison predicate table end-to-end; the two unit tests in
 // this module lock the contract-only fast-math flag on float arithmetic.
 

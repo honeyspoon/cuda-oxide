@@ -235,6 +235,39 @@ pub fn grid_sync_kernel(mut out: DisjointSlice<u32>) {
 
 Semantic markers for the codegen backend (pass-through -- no code transformation).
 
+### `#[constant]` -- Constant-Memory Statics
+
+Marks a module-scope `static` as a CUDA constant-memory global. The static must
+be typed `ConstantMemory<T>`. Its `UnsafeCell<T>` interior stops the compiler
+from constant-folding the initializer, so the writes the host makes with
+`cuMemcpyHtoD` stay visible to kernels.
+
+```rust
+#[cuda_module]
+mod kernels {
+    #[constant]
+    static COEFFS: ConstantMemory<[f32; 4]> = ConstantMemory::UNINIT;
+}
+```
+
+The macro attaches a reserved `export_name` so the PTX symbol is resolvable via
+`cuModuleGetGlobal`, and the host-side `#[cuda_module]` expansion generates the
+setters:
+
+- `module.set_<name>(&stream, &value)` -- stream-ordered async write, which
+  orders correctly against surrounding launches. Prefer this one.
+- `module.set_<name>_blocking(&value)` -- synchronous `cuMemcpyHtoD`, for
+  one-shot initialization with no stream in scope.
+
+Three restrictions worth knowing before you reach for it:
+
+- The initializer must be all-zeros, which in practice means
+  `ConstantMemory::UNINIT`. Non-zero initializers are not honored yet, so
+  populate from the host before any kernel reads.
+- The attribute must appear inside a `#[cuda_module]`. Anywhere else it
+  silently produces an unreachable symbol with no setter.
+- The identifier must not start with the reserved `cuda_oxide_` prefix.
+
 ## `#[cuda_module]` -- Typed Embedded Module Loading
 
 Wrap an inline module containing `#[kernel]` functions to generate a typed
@@ -488,9 +521,9 @@ combined with clobbers. `options(may_diverge)` must be paired with
 
 ```text
 src/
-├── lib.rs       # All proc-macro definitions (kernel, device, launch, etc.)
-├── printf.rs    # gpu_printf! implementation
-└── ptx_asm.rs   # ptx_asm! implementation
+├── lib.rs         # All proc-macro definitions (kernel, device, launch, etc.)
+├── printf.rs      # gpu_printf! implementation
+└── ptx_asm.rs     # ptx_asm! implementation
 ```
 
 ## Further Reading

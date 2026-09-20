@@ -104,7 +104,7 @@ pub fn emit_rust_bit_intrinsic(
     block_map: &[Ptr<BasicBlock>],
     loc: Location,
 ) -> TranslationResult<Ptr<Operation>> {
-    let return_type = types::translate_type(ctx, &body.locals()[destination.local].ty)?;
+    let return_type = types::translate_destination_type(ctx, body, destination, &loc)?;
     helpers::emit_function_call(
         ctx,
         body,
@@ -112,6 +112,7 @@ pub fn emit_rust_bit_intrinsic(
         args,
         destination,
         return_type,
+        None,
         target,
         block_ptr,
         prev_op,

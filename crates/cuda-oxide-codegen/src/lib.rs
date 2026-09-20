@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Experimental, rustc-independent cuda-oxide PTX backend.
+//! Rustc-independent cuda-oxide PTX backend.
 //!
 //! The only supported public surface is [`experimental`]. It accepts a module
 //! assembled from cuda-oxide's `dialect-mir` and `dialect-nvvm` operations and
@@ -21,20 +21,24 @@ mod export;
 mod generated;
 #[allow(dead_code, missing_docs)]
 mod generated_intrinsic_targets;
+mod iket;
 mod llvm_tools;
+mod local_memory_diagnostic;
 mod lower;
+mod mir_pass_registry;
 mod options;
 mod pipeline;
 mod prep;
 mod ptx;
 mod target;
 mod verify;
+mod warp_aggregate_constant_fp_atomics;
 
-/// Experimental standalone code-generation API.
+/// Standalone code-generation API.
 ///
 /// # Version contract
 ///
-/// This API is an experimental v1. It is source-compatible only with the exact
+/// This v1 API is source-compatible only with the exact
 /// cuda-oxide revision that supplies it. Frontends must pin cuda-oxide, Pliron,
 /// `dialect-mir`, and `dialect-nvvm` to one revision; their in-memory IR is not
 /// a stable interchange format.
@@ -47,9 +51,15 @@ mod verify;
 /// lowering pipeline. Kernel entries are top-level
 /// [`dialect_mir::ops::MirFuncOp`] values whose symbols are marked through
 /// [`CodegenModule::mark_kernel_entry`](experimental::CodegenModule::mark_kernel_entry).
-/// The v1 PTX output must be self-contained: libdevice calls and other
-/// unresolved functions return
+/// The v1 PTX output is self-contained. By default any libdevice call or
+/// other unresolved function returns
 /// [`CompileError::UnsupportedLinking`](experimental::CompileError::UnsupportedLinking).
+/// [`Linking::Libdevice`](experimental::Linking::Libdevice) opts into
+/// resolving `__nv_*` calls against `libdevice.10.bc` at the LLVM IR level,
+/// which keeps the output a single self-contained PTX artifact. Unresolved
+/// symbols that are not libdevice stay rejected under that option, and a
+/// toolchain that cannot perform the link returns
+/// [`CompileError::LibdeviceUnavailable`](experimental::CompileError::LibdeviceUnavailable).
 ///
 /// # Minimal flow
 ///
@@ -93,13 +103,13 @@ mod verify;
 pub mod experimental {
     pub use crate::api::{
         CodegenModule, Compilation, CompilationStage, CompileError, CompileOptions, Compiler,
-        DebugInfo, Diagnostic, DiagnosticLevel, Optimization, Target, Toolchain,
+        DebugInfo, Diagnostic, DiagnosticLevel, Linking, Optimization, Target, Toolchain,
     };
 }
 
 /// Existing cross-crate implementation hooks for mir-importer.
 ///
-/// This is not part of the experimental standalone frontend contract.
+/// This is not part of the standalone frontend contract.
 #[doc(hidden)]
 pub mod __private {
     #[doc(hidden)]

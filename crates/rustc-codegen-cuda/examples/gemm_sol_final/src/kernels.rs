@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Size-specialized device kernels for the canonical gemm_sol_final example.
 // include!d into main.rs so the #[cuda_module] macro sees an inline module
 // (it rejects file modules). Host validation and benchmarking remain in main.rs.
@@ -370,26 +373,26 @@ mod kernels {
                             *mut Barrier,
                         ) = match stage {
                             0 => (
-                                &raw const SMEM_A0 as u64,
-                                &raw const SMEM_B0 as u64,
+                                cvta_generic_to_shared_offset(&raw const SMEM_A0 as *const u8),
+                                cvta_generic_to_shared_offset(&raw const SMEM_B0 as *const u8),
                                 &raw const TMA_BAR0 as *const Barrier,
                                 &raw mut MMA_BAR0 as *mut Barrier,
                             ),
                             1 => (
-                                &raw const SMEM_A1 as u64,
-                                &raw const SMEM_B1 as u64,
+                                cvta_generic_to_shared_offset(&raw const SMEM_A1 as *const u8),
+                                cvta_generic_to_shared_offset(&raw const SMEM_B1 as *const u8),
                                 &raw const TMA_BAR1 as *const Barrier,
                                 &raw mut MMA_BAR1 as *mut Barrier,
                             ),
                             2 => (
-                                &raw const SMEM_A2 as u64,
-                                &raw const SMEM_B2 as u64,
+                                cvta_generic_to_shared_offset(&raw const SMEM_A2 as *const u8),
+                                cvta_generic_to_shared_offset(&raw const SMEM_B2 as *const u8),
                                 &raw const TMA_BAR2 as *const Barrier,
                                 &raw mut MMA_BAR2 as *mut Barrier,
                             ),
                             _ => (
-                                &raw const SMEM_A3 as u64,
-                                &raw const SMEM_B3 as u64,
+                                cvta_generic_to_shared_offset(&raw const SMEM_A3 as *const u8),
+                                cvta_generic_to_shared_offset(&raw const SMEM_B3 as *const u8),
                                 &raw const TMA_BAR3 as *const Barrier,
                                 &raw mut MMA_BAR3 as *mut Barrier,
                             ),
@@ -467,9 +470,9 @@ mod kernels {
                 let mut tile_parity: u32 = 0;
 
                 let leader_accum_empty0_addr =
-                    cluster::map_shared_rank(&raw const ACCUM_EMPTY0, 0) as u64;
+                    cvta_generic_to_shared_offset(cluster::map_shared_rank(&raw const ACCUM_EMPTY0, 0) as *const u8);
                 let leader_accum_empty1_addr =
-                    cluster::map_shared_rank(&raw const ACCUM_EMPTY1, 0) as u64;
+                    cvta_generic_to_shared_offset(cluster::map_shared_rank(&raw const ACCUM_EMPTY1, 0) as *const u8);
 
                 const TILE_N: usize = 256;
                 let warp_row_base = (warp_id * 32) as usize;
@@ -525,8 +528,8 @@ mod kernels {
                             );
                             tcgen05_load_wait();
 
-                            let p0_lo = cvt_f32x2_bf16x2(regs_a[0], regs_a[1]);
-                            let p1_lo = cvt_f32x2_bf16x2(regs_b[0], regs_b[1]);
+                            let p0_lo = cvt_bf16x2_f32(regs_a[0], regs_a[1]);
+                            let p1_lo = cvt_bf16x2_f32(regs_b[0], regs_b[1]);
                             let out_row_lo =
                                 warp_row_base + (tmem_row_block as usize * 16) + row_within_8;
                             let smem_addr_lo = (&raw mut SMEM_OUT as *mut u8).add(
@@ -536,8 +539,8 @@ mod kernels {
                             );
                             stmatrix_m8n8_x2(smem_addr_lo, p0_lo, p1_lo);
 
-                            let p0_hi = cvt_f32x2_bf16x2(regs_a[2], regs_a[3]);
-                            let p1_hi = cvt_f32x2_bf16x2(regs_b[2], regs_b[3]);
+                            let p0_hi = cvt_bf16x2_f32(regs_a[2], regs_a[3]);
+                            let p1_hi = cvt_bf16x2_f32(regs_b[2], regs_b[3]);
                             let out_row_hi =
                                 warp_row_base + (tmem_row_block as usize * 16) + 8 + row_within_8;
                             let smem_addr_hi = (&raw mut SMEM_OUT as *mut u8).add(
@@ -986,26 +989,26 @@ mod kernels {
                             *mut Barrier,
                         ) = match stage {
                             0 => (
-                                &raw const SMEM_A0 as u64,
-                                &raw const SMEM_B0 as u64,
+                                cvta_generic_to_shared_offset(&raw const SMEM_A0 as *const u8),
+                                cvta_generic_to_shared_offset(&raw const SMEM_B0 as *const u8),
                                 &raw const TMA_BAR0 as *const Barrier,
                                 &raw mut MMA_BAR0 as *mut Barrier,
                             ),
                             1 => (
-                                &raw const SMEM_A1 as u64,
-                                &raw const SMEM_B1 as u64,
+                                cvta_generic_to_shared_offset(&raw const SMEM_A1 as *const u8),
+                                cvta_generic_to_shared_offset(&raw const SMEM_B1 as *const u8),
                                 &raw const TMA_BAR1 as *const Barrier,
                                 &raw mut MMA_BAR1 as *mut Barrier,
                             ),
                             2 => (
-                                &raw const SMEM_A2 as u64,
-                                &raw const SMEM_B2 as u64,
+                                cvta_generic_to_shared_offset(&raw const SMEM_A2 as *const u8),
+                                cvta_generic_to_shared_offset(&raw const SMEM_B2 as *const u8),
                                 &raw const TMA_BAR2 as *const Barrier,
                                 &raw mut MMA_BAR2 as *mut Barrier,
                             ),
                             _ => (
-                                &raw const SMEM_A3 as u64,
-                                &raw const SMEM_B3 as u64,
+                                cvta_generic_to_shared_offset(&raw const SMEM_A3 as *const u8),
+                                cvta_generic_to_shared_offset(&raw const SMEM_B3 as *const u8),
                                 &raw const TMA_BAR3 as *const Barrier,
                                 &raw mut MMA_BAR3 as *mut Barrier,
                             ),
@@ -1118,9 +1121,9 @@ mod kernels {
                 let mut tile_parity: u32 = 0;
 
                 let leader_accum_empty0_addr =
-                    cluster::map_shared_rank(&raw const ACCUM_EMPTY0, 0) as u64;
+                    cvta_generic_to_shared_offset(cluster::map_shared_rank(&raw const ACCUM_EMPTY0, 0) as *const u8);
                 let leader_accum_empty1_addr =
-                    cluster::map_shared_rank(&raw const ACCUM_EMPTY1, 0) as u64;
+                    cvta_generic_to_shared_offset(cluster::map_shared_rank(&raw const ACCUM_EMPTY1, 0) as *const u8);
 
                 const SCRATCH_BF16_COLS: usize = 128;
                 const SCRATCH_U32_COLS: usize = SCRATCH_BF16_COLS / 2;
@@ -1196,8 +1199,8 @@ mod kernels {
                                     );
                                     tcgen05_load_wait();
 
-                                    let p0_lo = cvt_f32x2_bf16x2(regs_a[0], regs_a[1]);
-                                    let p1_lo = cvt_f32x2_bf16x2(regs_b[0], regs_b[1]);
+                                    let p0_lo = cvt_bf16x2_f32(regs_a[0], regs_a[1]);
+                                    let p1_lo = cvt_bf16x2_f32(regs_b[0], regs_b[1]);
                                     let scratch_row_lo = scratch_row_base + row_within_8;
                                     let smem_addr_lo = warp_scratch_u8.add(
                                         scratch_row_lo * SCRATCH_ROW_BYTES
@@ -1206,8 +1209,8 @@ mod kernels {
                                     );
                                     stmatrix_m8n8_x2(smem_addr_lo, p0_lo, p1_lo);
 
-                                    let p0_hi = cvt_f32x2_bf16x2(regs_a[2], regs_a[3]);
-                                    let p1_hi = cvt_f32x2_bf16x2(regs_b[2], regs_b[3]);
+                                    let p0_hi = cvt_bf16x2_f32(regs_a[2], regs_a[3]);
+                                    let p1_hi = cvt_bf16x2_f32(regs_b[2], regs_b[3]);
                                     let scratch_row_hi =
                                         scratch_row_base + 8 + row_within_8;
                                     let smem_addr_hi = warp_scratch_u8.add(

@@ -3,8 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#![feature(never_type)]
-
 //! Regression for lowering function-item receivers in rust-call paths.
 //!
 //! Passing a function item to a generic `FnOnce` helper makes MIR call
@@ -17,7 +15,8 @@
 //! `call_once_decoy` proves that an ordinary function whose name contains
 //! trait-like text is not mistaken for a callable-trait shim.
 
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, DeviceBuffer};
 use cuda_device::{DisjointSlice, device, kernel, thread};
 use cuda_host::cuda_module;
 

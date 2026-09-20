@@ -7,11 +7,14 @@
 //!
 //! Handles Hopper `sm_90a` asynchronous warpgroup matrix operations.
 
-use super::super::helpers::{emit_goto, emit_store_result_and_goto};
+use super::super::helpers::{self, emit_goto};
 use crate::error::{TranslationErr, TranslationResult};
 use crate::translator::rvalue;
 use crate::translator::values::ValueMap;
-use dialect_nvvm::ops::{WgmmaMakeSmemDescOp, WgmmaMmaM64N64K16F32Bf16Op};
+use dialect_nvvm::ops::{
+    WgmmaMakeSmemDescOp, WgmmaMmaM64N64K8F32Tf32Op, WgmmaMmaM64N64K16F32Bf16Op,
+    WgmmaMmaM64N64K16F32F16Op, WgmmaMmaM64N128K16F32Bf16Op,
+};
 use pliron::basic_block::BasicBlock;
 use pliron::builtin::types::{IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
@@ -19,18 +22,17 @@ use pliron::input_err;
 use pliron::location::{Located, Location};
 use pliron::op::Op;
 use pliron::operation::Operation;
+use pliron::value::Value;
 use rustc_public::mir;
 
 const CUSTOM_DESCRIPTOR_UNSUPPORTED: &str = "custom WGMMA descriptor encoding is not yet supported";
-const MMA_UNSUPPORTED: &str = "WGMMA MMA is not yet supported: lowering must preserve delayed \
-32-register accumulator state across commit_group and wait_group";
+const MMA_UNSUPPORTED: &str =
+    "this WGMMA MMA variant is not yet supported by the importer and lowering pipeline";
 
 fn unsupported_diagnostic(path: &str) -> Option<&'static str> {
     match path {
         "cuda_device::wgmma::make_smem_desc_custom" => Some(CUSTOM_DESCRIPTOR_UNSUPPORTED),
-        "cuda_device::wgmma::wgmma_mma_m64n64k16_f32_bf16"
-        | "cuda_device::wgmma::wgmma_mma_m64n64k16_f32_f16"
-        | "cuda_device::wgmma::wgmma_mma_m64n64k16_f32_tf32" => Some(MMA_UNSUPPORTED),
+        "cuda_device::wgmma::wgmma_mma_m64n64k16_f32_tf32" => Some(MMA_UNSUPPORTED),
         _ => None,
     }
 }
@@ -44,11 +46,6 @@ pub(crate) fn reject_unsupported(path: &str, loc: Location) -> TranslationResult
 }
 
 /// Emit make_smem_desc: Create SMEM descriptor for WGMMA.
-///
-/// Args:
-/// - `args[0]`: *const u8 (pointer to shared memory)
-///
-/// Returns: u64 (64-bit descriptor)
 pub fn emit_wgmma_make_smem_desc(
     ctx: &mut Context,
     body: &mir::Body,
@@ -71,7 +68,6 @@ pub fn emit_wgmma_make_smem_desc(
         );
     }
 
-    // Translate the pointer argument
     let (ptr_val, last_op) = rvalue::translate_operand(
         ctx,
         body,
@@ -82,14 +78,22 @@ pub fn emit_wgmma_make_smem_desc(
         loc.clone(),
     )?;
 
-    // Create the make_smem_desc operation (returns u64)
-    // Use Unsigned signedness to match Rust's u64 type
+    let (prepared_destination, last_op) = helpers::prepare_destination_write(
+        ctx,
+        body,
+        destination,
+        value_map,
+        block_ptr,
+        last_op,
+        loc.clone(),
+    )?;
+
     let u64_ty = IntegerType::get(ctx, 64, Signedness::Unsigned);
     let desc_op = Operation::new(
         ctx,
         WgmmaMakeSmemDescOp::get_concrete_op_info(),
-        vec![u64_ty.into()], // Result: u64
-        vec![ptr_val],       // Operand: ptr
+        vec![u64_ty.into()],
+        vec![ptr_val],
         vec![],
         0,
     );
@@ -101,11 +105,10 @@ pub fn emit_wgmma_make_smem_desc(
         desc_op.insert_at_front(block_ptr, ctx);
     }
 
-    // Map the result
     let result_value = desc_op.deref(ctx).get_result(0);
-    emit_store_result_and_goto(
+    helpers::emit_prepared_result_and_goto(
         ctx,
-        destination,
+        prepared_destination,
         result_value,
         target,
         block_ptr,
@@ -117,20 +120,213 @@ pub fn emit_wgmma_make_smem_desc(
     )
 }
 
-/// Emit wgmma_mma_m64n64k16_f32_bf16: WGMMA matrix multiply-accumulate.
+#[allow(clippy::too_many_arguments)]
+fn emit_wgmma_mma_pointer_form<F>(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+    build_op: F,
+    intrinsic_name: &'static str,
+) -> TranslationResult<Ptr<Operation>>
+where
+    F: FnOnce(&mut Context, Vec<Value>) -> Ptr<Operation>,
+{
+    if args.len() != 3 {
+        return input_err!(
+            loc.clone(),
+            TranslationErr::unsupported(format!(
+                "{intrinsic_name} expects 3 arguments (acc_ptr, desc_a, desc_b), got {}",
+                args.len()
+            ))
+        );
+    }
+
+    let mut last_op = prev_op;
+    let (acc_ptr, next) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[0],
+        value_map,
+        block_ptr,
+        last_op,
+        loc.clone(),
+    )?;
+    last_op = next;
+    let (desc_a, next) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[1],
+        value_map,
+        block_ptr,
+        last_op,
+        loc.clone(),
+    )?;
+    last_op = next;
+    let (desc_b, next) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[2],
+        value_map,
+        block_ptr,
+        last_op,
+        loc.clone(),
+    )?;
+    last_op = next;
+
+    let mma_op = build_op(ctx, vec![acc_ptr, desc_a, desc_b]);
+    mma_op.deref_mut(ctx).set_loc(loc.clone());
+
+    if let Some(prev) = last_op {
+        mma_op.insert_after(ctx, prev);
+    } else {
+        mma_op.insert_at_front(block_ptr, ctx);
+    }
+
+    if let Some(target_idx) = target {
+        Ok(emit_goto(ctx, *target_idx, mma_op, block_map, loc))
+    } else {
+        input_err!(
+            loc,
+            TranslationErr::unsupported(format!("{intrinsic_name} call without target block"))
+        )
+    }
+}
+
+/// Emit BF16 m64n64k16 WGMMA pointer form.
 ///
-/// Performs D = A × B + D where:
-/// - A: 64×16 (from SMEM descriptor)
-/// - B: 16×64 (from SMEM descriptor)
-/// - D: 64×64 accumulator (32 f32 values per thread, passed by pointer)
-///
-/// Args:
-/// - `args[0]`: &mut [[f32; 8]; 4] (accumulator pointer, read-modify-write)
-/// - `args[1]`: u64 (desc_a - SMEM descriptor for A)
-/// - `args[2]`: u64 (desc_b - SMEM descriptor for B)
-///
-/// Returns: void (accumulator updated in-place)
+/// `mir-lower` later selects a proven-safe enclosing region: a linear full
+/// drain, a static partial-wait pipeline, or the canonical counted K-loop.
+/// The selected region is fused so LLVM cannot observe an accumulator while a
+/// WGMMA group that references it is still pending.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_wgmma_mma_m64n64k16_f32_bf16(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_wgmma_mma_pointer_form(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        |ctx, operands| {
+            Operation::new(
+                ctx,
+                WgmmaMmaM64N64K16F32Bf16Op::get_concrete_op_info(),
+                vec![],
+                operands,
+                vec![],
+                0,
+            )
+        },
+        "wgmma_mma_m64n64k16_f32_bf16",
+    )
+}
+
+/// Emit BF16 m64n128k16 WGMMA pointer form.
+///
+/// `mir-lower` accepts this variant only in a canonical linear full-drain
+/// region with a `[[f32; 8]; 8]` accumulator and a final `wait_group<0>`.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_wgmma_mma_m64n128k16_f32_bf16(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_wgmma_mma_pointer_form(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        |ctx, operands| {
+            Operation::new(
+                ctx,
+                WgmmaMmaM64N128K16F32Bf16Op::get_concrete_op_info(),
+                vec![],
+                operands,
+                vec![],
+                0,
+            )
+        },
+        "wgmma_mma_m64n128k16_f32_bf16",
+    )
+}
+
+/// Emit F16 m64n64k16 WGMMA pointer form.
+///
+/// `mir-lower` accepts this variant only in a canonical linear full-drain
+/// region ending in `wait_group<0>`. Counted loops and partial-wait pipelines
+/// remain BF16-only.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_wgmma_mma_m64n64k16_f32_f16(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    emit_wgmma_mma_pointer_form(
+        ctx,
+        body,
+        args,
+        target,
+        block_ptr,
+        prev_op,
+        value_map,
+        block_map,
+        loc,
+        |ctx, operands| {
+            Operation::new(
+                ctx,
+                WgmmaMmaM64N64K16F32F16Op::get_concrete_op_info(),
+                vec![],
+                operands,
+                vec![],
+                0,
+            )
+        },
+        "wgmma_mma_m64n64k16_f32_f16",
+    )
+}
+
+/// Emit TF32 m64n64k8 WGMMA pointer form.
+///
+/// `mir-lower` accepts this variant only in a canonical linear full-drain
+/// region ending in `wait_group<0>`. Counted loops, partial-wait pipelines,
+/// and pointer fallback remain BF16-only.
+pub fn emit_wgmma_mma_m64n64k8_f32_tf32(
     ctx: &mut Context,
     body: &mir::Body,
     args: &[mir::Operand],
@@ -145,17 +341,14 @@ pub fn emit_wgmma_mma_m64n64k16_f32_bf16(
         return input_err!(
             loc.clone(),
             TranslationErr::unsupported(format!(
-                "wgmma_mma_m64n64k16_f32_bf16 expects 3 arguments (acc_ptr, desc_a, desc_b), got {}",
+                "wgmma_mma_m64n64k8_f32_tf32 expects 3 arguments (acc_ptr, desc_a, desc_b), got {}",
                 args.len()
             ))
         );
     }
 
-    // Translate arguments
     let mut last_op = prev_op;
-
-    // arg[0]: acc_ptr (pointer to accumulator array)
-    let (acc_ptr, last_op_after) = rvalue::translate_operand(
+    let (acc_ptr, next) = rvalue::translate_operand(
         ctx,
         body,
         &args[0],
@@ -164,10 +357,8 @@ pub fn emit_wgmma_mma_m64n64k16_f32_bf16(
         last_op,
         loc.clone(),
     )?;
-    last_op = last_op_after;
-
-    // arg[1]: desc_a (u64 descriptor)
-    let (desc_a, last_op_after) = rvalue::translate_operand(
+    last_op = next;
+    let (desc_a, next) = rvalue::translate_operand(
         ctx,
         body,
         &args[1],
@@ -176,10 +367,8 @@ pub fn emit_wgmma_mma_m64n64k16_f32_bf16(
         last_op,
         loc.clone(),
     )?;
-    last_op = last_op_after;
-
-    // arg[2]: desc_b (u64 descriptor)
-    let (desc_b, last_op_after) = rvalue::translate_operand(
+    last_op = next;
+    let (desc_b, next) = rvalue::translate_operand(
         ctx,
         body,
         &args[2],
@@ -188,14 +377,13 @@ pub fn emit_wgmma_mma_m64n64k16_f32_bf16(
         last_op,
         loc.clone(),
     )?;
-    last_op = last_op_after;
+    last_op = next;
 
-    // Create the WGMMA MMA operation
     let mma_op = Operation::new(
         ctx,
-        WgmmaMmaM64N64K16F32Bf16Op::get_concrete_op_info(),
-        vec![],                        // No results (void)
-        vec![acc_ptr, desc_a, desc_b], // Operands
+        WgmmaMmaM64N64K8F32Tf32Op::get_concrete_op_info(),
+        vec![],
+        vec![acc_ptr, desc_a, desc_b],
         vec![],
         0,
     );
@@ -207,15 +395,13 @@ pub fn emit_wgmma_mma_m64n64k16_f32_bf16(
         mma_op.insert_at_front(block_ptr, ctx);
     }
 
-    // Emit goto to target block
     if let Some(target_idx) = target {
-        let goto_op = emit_goto(ctx, *target_idx, mma_op, block_map, loc);
-        Ok(goto_op)
+        Ok(emit_goto(ctx, *target_idx, mma_op, block_map, loc))
     } else {
         input_err!(
-            loc.clone(),
+            loc,
             TranslationErr::unsupported(
-                "wgmma_mma_m64n64k16_f32_bf16 call without target block".to_string()
+                "wgmma_mma_m64n64k8_f32_tf32 call without target block".to_string()
             )
         )
     }
@@ -233,11 +419,16 @@ mod tests {
         );
         for path in [
             "cuda_device::wgmma::wgmma_mma_m64n64k16_f32_bf16",
+            "cuda_device::wgmma::wgmma_mma_m64n128k16_f32_bf16",
             "cuda_device::wgmma::wgmma_mma_m64n64k16_f32_f16",
-            "cuda_device::wgmma::wgmma_mma_m64n64k16_f32_tf32",
+            "cuda_device::wgmma::wgmma_mma_m64n64k8_f32_tf32",
         ] {
-            assert_eq!(unsupported_diagnostic(path), Some(MMA_UNSUPPORTED));
+            assert_eq!(unsupported_diagnostic(path), None);
         }
+        assert_eq!(
+            unsupported_diagnostic("cuda_device::wgmma::wgmma_mma_m64n64k16_f32_tf32"),
+            Some(MMA_UNSUPPORTED)
+        );
 
         for path in [
             "cuda_device::wgmma::make_smem_desc",

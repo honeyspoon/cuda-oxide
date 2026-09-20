@@ -25,7 +25,8 @@
 //! Build and run with:
 //!   cargo oxide run dotprod --arch sm_80
 
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, DeviceBuffer};
 use cuda_device::dotprod::{dp2a_s32, dp2a_u32, dp4a_s32, dp4a_u32};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_module;
@@ -89,11 +90,7 @@ fn main() {
         return;
     }
 
-    let module = ctx
-        .load_module_from_file("dotprod.ptx")
-        .expect("Failed to load PTX module");
-    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
-
+    let module = kernels::load(&ctx).expect("Failed to load embedded CUDA module");
     // ---- dp4a operands ---------------------------------------------------
     // Pack bytes [1, 2, 3, 200] into u32 (little-endian: byte0 = LSB).
     //   a4 = 0xC8_03_02_01

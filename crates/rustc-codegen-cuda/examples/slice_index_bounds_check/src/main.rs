@@ -14,7 +14,8 @@
 //! or the launch must fail (thread trapped).
 //! If the sentinel is overwritten, the kernel performed an out-of-bounds global read.
 
-use cuda_core::{CudaContext, CudaStream, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, CudaStream, DeviceBuffer};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_module;
 use std::sync::Arc;
@@ -122,12 +123,7 @@ fn main() {
     let ctx = CudaContext::new(0).expect("Failed to create CUDA context");
     println!("Device ordinal: {}\n", ctx.ordinal());
 
-    let ptx_path = concat!(env!("CARGO_MANIFEST_DIR"), "/slice_index_bounds_check.ptx");
-    let module = ctx
-        .load_module_from_file(ptx_path)
-        .expect("Failed to load PTX");
-    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
-
+    let module = kernels::load(&ctx).expect("Failed to load embedded CUDA module");
     let stream = ctx.default_stream();
 
     // The out-of-bounds test runs last

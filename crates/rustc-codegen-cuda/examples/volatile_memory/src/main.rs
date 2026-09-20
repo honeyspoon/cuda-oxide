@@ -1,11 +1,12 @@
-// Copyright (c) 2024-2026 NVIDIA CORPORATION. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Volatile device memory access through `core::ptr::{read,write}_volatile`.
 //!
 //! Run: `cargo oxide run volatile_memory`
 
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, DeviceBuffer};
 use cuda_device::{DisjointSlice, cuda_module, kernel, thread};
 
 const MASK: u32 = 0x5a5a_5a5a;

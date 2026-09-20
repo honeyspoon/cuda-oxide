@@ -74,7 +74,8 @@ mod kernels {
 // =============================================================================
 
 fn main() {
-    use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+    use cuda_core::simt::LaunchConfig;
+    use cuda_core::{CudaContext, DeviceBuffer};
 
     println!("=== redux.sync.add Warp Reduction (sm_80+) ===\n");
 
@@ -95,11 +96,7 @@ fn main() {
     const WARPS: usize = N / 32;
     const EXPECTED: u32 = 496; // 0 + 1 + ... + 31
 
-    let module = ctx
-        .load_module_from_file("redux_sum.ptx")
-        .expect("Failed to load PTX module");
-    let module = kernels::from_module(module).expect("Failed to initialize typed CUDA module");
-
+    let module = kernels::load(&ctx).expect("Failed to load embedded CUDA module");
     let cfg = LaunchConfig {
         block_dim: (32, 1, 1),
         grid_dim: (WARPS as u32, 1, 1),

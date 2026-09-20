@@ -146,24 +146,80 @@ pub fn push_kernel_scalar<T: KernelScalar>(args: &mut Vec<*mut c_void>, value: &
     args.push(value as *mut T as *mut c_void);
 }
 
+/// Returns a Rust-valid data pointer spelling for a kernel slice launch packet.
+///
+/// `DeviceBuffer` represents a zero-byte allocation with `CUdeviceptr == 0`,
+/// while a Rust slice reference still requires its data pointer to be non-null
+/// and aligned even when its byte extent is zero. Normalize only the launch
+/// packet in that case; the owning buffer keeps its original pointer and no
+/// backing allocation is implied by this sentinel.
+///
+/// CUDA allocation does not guarantee arbitrary Rust over-alignment. Check the
+/// actual address for nonzero byte extents before exposing the slice to a
+/// kernel whose reference parameters promise `nonnull` and `align` to LLVM.
+#[inline]
+#[track_caller]
+fn kernel_slice_device_ptr<T>(
+    ptr: cuda_core::sys::CUdeviceptr,
+    len: usize,
+) -> cuda_core::sys::CUdeviceptr {
+    let alignment = std::mem::align_of::<T>() as cuda_core::sys::CUdeviceptr;
+    if len == 0 || std::mem::size_of::<T>() == 0 {
+        return alignment;
+    }
+    assert_ne!(ptr, 0, "nonempty kernel slice has a null device pointer");
+    assert_eq!(
+        ptr % alignment,
+        0,
+        "kernel slice device pointer {ptr:#x} does not satisfy the {alignment}-byte alignment of {}",
+        std::any::type_name::<T>(),
+    );
+    ptr
+}
+
 /// Returns the `(device pointer, element count)` pair used for read-only slice
 /// parameters such as `&[T]`.
+///
+/// # Panics
+///
+/// Panics before launch if a nonzero byte extent has a null device pointer or
+/// its address is not aligned for `T`. In particular, CUDA allocation alone
+/// does not establish arbitrary `#[repr(align(N))]` requirements.
 #[inline]
+#[track_caller]
 #[doc(hidden)]
 pub fn read_only_device_buffer_arg<T>(
     buffer: &cuda_core::DeviceBuffer<T>,
 ) -> (cuda_core::sys::CUdeviceptr, u64) {
-    (buffer.cu_deviceptr(), buffer.len() as u64)
+    let len = buffer.len();
+    (
+        kernel_slice_device_ptr::<T>(buffer.cu_deviceptr(), len),
+        len as u64,
+    )
 }
 
 /// Returns the `(device pointer, element count)` pair used for writable slice
 /// parameters such as `&mut [T]` and `DisjointSlice<T>`.
+///
+/// `DisjointSlice` shares this host packet helper, so its zero-byte packet gets
+/// the same harmless canonical pointer spelling. That does not derive or imply
+/// any LLVM reference-validity attribute for `DisjointSlice`.
+///
+/// # Panics
+///
+/// Panics before launch if a nonzero byte extent has a null device pointer or
+/// its address is not aligned for `T`.
 #[inline]
+#[track_caller]
 #[doc(hidden)]
 pub fn writable_device_buffer_arg<T>(
     buffer: &mut cuda_core::DeviceBuffer<T>,
 ) -> (cuda_core::sys::CUdeviceptr, u64) {
-    (buffer.cu_deviceptr(), buffer.len() as u64)
+    let len = buffer.len();
+    (
+        kernel_slice_device_ptr::<T>(buffer.cu_deviceptr(), len),
+        len as u64,
+    )
 }
 
 /// Pushes a device slice argument pair into a CUDA driver argument list.
@@ -183,6 +239,141 @@ pub fn push_kernel_device_slice(
     args.push(len as *mut u64 as *mut c_void);
 }
 
+/// A device buffer together with the row width the kernel will index it by.
+///
+/// Kernels whose index space fixes the row width in the type need nothing
+/// here. A kernel taking `DisjointSlice<T, RuntimeRowMajorTiles<R, C>>` or
+/// `DisjointSlice<T, Runtime2DIndex>` reads its row width from the slice, and
+/// this is where that width is supplied.
+///
+/// Binding the row width on the host is what makes the device-side accessor
+/// safe. One value is written into the launch packet, so every thread reads
+/// the same row width and distinct thread coordinates map to disjoint tiles.
+/// A width passed per call could not give that: device code can select between
+/// two launch-uniform values under a thread-varying condition, and two threads
+/// then resolve the same element.
+///
+/// ```rust,ignore
+/// kernels::sgemm(&stream, cfg, m, k, alpha, &a, &b, RowWidth::new(&mut c, n))?;
+/// ```
+pub struct RowWidth<'a, T> {
+    buffer: &'a mut cuda_core::DeviceBuffer<T>,
+    width: u32,
+}
+
+impl<'a, T> RowWidth<'a, T> {
+    /// Bind `width` as the row width for this launch's view of `buffer`.
+    ///
+    /// `width` is a count of elements, not bytes.
+    #[inline]
+    pub fn new(buffer: &'a mut cuda_core::DeviceBuffer<T>, width: u32) -> Self {
+        RowWidth { buffer, width }
+    }
+
+    /// The row width bound here, in elements.
+    #[inline]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// The element count of the bound buffer.
+    ///
+    /// A `requires` clause naming `c.len()` resolves here, so a size relation
+    /// reads the same whether or not the slice carries a row width.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Whether the bound buffer is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.buffer.len() == 0
+    }
+}
+
+/// An owned device buffer together with the row width the kernel indexes it by.
+///
+/// The owned counterpart of [`RowWidth`], for the async launch flavours that
+/// take ownership of their buffers so the allocation outlives the launch. The
+/// row width binds the same way and for the same reason.
+pub struct RowWidthOwned<B> {
+    buffer: B,
+    width: u32,
+}
+
+impl<B> RowWidthOwned<B> {
+    /// Bind `width` as the row width for this launch's view of `buffer`.
+    ///
+    /// `width` is a count of elements, not bytes.
+    #[inline]
+    pub fn new(buffer: B, width: u32) -> Self {
+        RowWidthOwned { buffer, width }
+    }
+
+    /// The row width bound here, in elements.
+    #[inline]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// The buffer this row width was bound to.
+    #[inline]
+    pub fn buffer(&self) -> &B {
+        &self.buffer
+    }
+
+    /// Recover the buffer, dropping the binding.
+    ///
+    /// An owned async launch hands its resources back when it completes, so a
+    /// later stage that no longer indexes by rows takes the buffer out here.
+    #[inline]
+    pub fn into_buffer(self) -> B {
+        self.buffer
+    }
+}
+
+/// Returns the `(device pointer, element count, row width)` triple used for
+/// writable slice parameters whose index space carries a runtime row width.
+///
+/// # Panics
+///
+/// Panics before launch if a nonzero byte extent has a null device pointer or
+/// its address is not aligned for `T`.
+#[inline]
+#[track_caller]
+#[doc(hidden)]
+pub fn row_width_device_buffer_arg<T>(
+    bound: RowWidth<'_, T>,
+) -> (cuda_core::sys::CUdeviceptr, u64, u32) {
+    let len = bound.buffer.len();
+    (
+        kernel_slice_device_ptr::<T>(bound.buffer.cu_deviceptr(), len),
+        len as u64,
+        bound.width,
+    )
+}
+
+/// Pushes a row-width device slice argument triple into a driver argument
+/// list.
+///
+/// A slice over an index space with a runtime row width lowers to three kernel
+/// parameters: `CUdeviceptr`, `u64` element count and `u32` row width,
+/// matching the `{ ptr, len, space }` layout of the device-side
+/// `DisjointSlice`.
+#[inline]
+#[doc(hidden)]
+pub fn push_kernel_row_width_device_slice(
+    args: &mut Vec<*mut c_void>,
+    ptr: &mut cuda_core::sys::CUdeviceptr,
+    len: &mut u64,
+    width: &mut u32,
+) {
+    args.push(ptr as *mut cuda_core::sys::CUdeviceptr as *mut c_void);
+    args.push(len as *mut u64 as *mut c_void);
+    args.push(width as *mut u32 as *mut c_void);
+}
+
 // =============================================================================
 // Typed Async Kernel Arguments
 // =============================================================================
@@ -193,13 +384,19 @@ pub fn push_kernel_device_slice(
 /// # Safety
 ///
 /// For a nonzero byte extent, every value returned by
-/// [`cu_deviceptr`](Self::cu_deviceptr) must identify a live, correctly aligned
-/// device allocation covering at least `len()` consecutive `Elem` values. The
+/// [`cu_deviceptr`](Self::cu_deviceptr) must identify a live device allocation
+/// covering at least `len() * size_of::<Elem>()` bytes. The
 /// allocation must remain valid for the full borrow or owned operation in
-/// which this value is used. When used as a read-only `KernelSliceArg`, the
-/// reported range must obey Rust's shared-reference rules: it cannot be
-/// mutated except through `UnsafeCell`-based or atomic element types under
-/// their synchronization contract.
+/// which this value is used. Zero-byte views do not require backing allocation;
+/// the launch adapter replaces their packet pointer with a non-null value
+/// aligned for `Elem` so the device-side Rust slice keeps its validity
+/// invariant. For nonzero byte extents, the adapter checks nullness and actual
+/// element alignment before enqueueing; a raw accessor alone does not prove
+/// that a reference to `Elem` may be formed. When used as a read-only
+/// `KernelSliceArg`, the reported range
+/// must obey Rust's shared-reference rules: it cannot be mutated except through
+/// `UnsafeCell`-based or atomic element types under their synchronization
+/// contract.
 ///
 /// Implementing this trait is unsafe because generated launch methods trust
 /// the pointer and length without inspecting the allocation:
@@ -237,7 +434,7 @@ pub unsafe trait KernelSliceArg {
 ///
 /// # Safety
 ///
-/// The pointer, extent, alignment, and lifetime requirements from
+/// The pointer, extent, and lifetime requirements from
 /// [`KernelSliceArg`] still apply. Its shared-read restriction is replaced by
 /// this rule: the implementor must own exclusive device-write authority for
 /// the entire reported element range for the lifetime of the mutable borrow or
@@ -268,7 +465,7 @@ unsafe impl<T> KernelSliceArgMut for cuda_core::DeviceBuffer<T> {}
 #[cfg(feature = "async")]
 // SAFETY: DeviceBox owns the reported allocation and its raw constructor
 // requires the pointer, element count, and device ordinal to be truthful.
-unsafe impl<T: Send> KernelSliceArg for cuda_async::device_box::DeviceBox<[T]> {
+unsafe impl<T: Send> KernelSliceArg for cuda_async::simt::device_box::DeviceBox<[T]> {
     type Elem = T;
 
     fn cu_deviceptr(&self) -> cuda_core::sys::CUdeviceptr {
@@ -283,7 +480,7 @@ unsafe impl<T: Send> KernelSliceArg for cuda_async::device_box::DeviceBox<[T]> {
 #[cfg(feature = "async")]
 // SAFETY: &mut DeviceBox provides exclusive host authority to launch device
 // writes through this adapter for the duration of the operation.
-unsafe impl<T: Send> KernelSliceArgMut for cuda_async::device_box::DeviceBox<[T]> {}
+unsafe impl<T: Send> KernelSliceArgMut for cuda_async::simt::device_box::DeviceBox<[T]> {}
 
 #[cfg(feature = "async")]
 // SAFETY: Arc only extends the lifetime of B and delegates both truthful
@@ -307,22 +504,22 @@ where
 #[cfg(feature = "async")]
 pub fn new_async_kernel_launch_builder<'a>(
     func: cuda_core::CudaFunction,
-) -> cuda_async::launch::AsyncKernelLaunchBuilder<'a> {
-    cuda_async::launch::AsyncKernelLaunchBuilder::new(Arc::new(func))
+) -> cuda_async::simt::launch::AsyncKernelLaunchBuilder<'a> {
+    cuda_async::simt::launch::AsyncKernelLaunchBuilder::new(Arc::new(func))
 }
 
 #[doc(hidden)]
 #[cfg(feature = "async")]
 pub fn new_owned_async_kernel_launch<R: Send>(
-    launch: cuda_async::launch::AsyncKernelLaunch<'static>,
+    launch: cuda_async::simt::launch::AsyncKernelLaunch<'static>,
     resources: R,
-) -> cuda_async::launch::OwnedAsyncKernelLaunch<R> {
-    cuda_async::launch::OwnedAsyncKernelLaunch::new(launch, resources)
+) -> cuda_async::simt::launch::OwnedAsyncKernelLaunch<R> {
+    cuda_async::simt::launch::OwnedAsyncKernelLaunch::new(launch, resources)
 }
 
 /// Async operation carrying a validated, kernel-branded launch.
 ///
-/// The underlying [`cuda_async::launch::AsyncKernelLaunch`] is immutable after
+/// The underlying [`cuda_async::simt::launch::AsyncKernelLaunch`] is immutable after
 /// its builder is finalized. This wrapper additionally carries the prepared
 /// contract and checks the stream selected by the async scheduler against the
 /// prepared function's CUDA context immediately before submission.
@@ -331,7 +528,7 @@ pub struct PreparedAsyncKernelLaunch<'a, Contract>
 where
     Contract: cuda_core::KernelLaunchContract,
 {
-    launch: cuda_async::launch::AsyncKernelLaunch<'a>,
+    launch: cuda_async::simt::launch::AsyncKernelLaunch<'a>,
     prepared: cuda_core::PreparedLaunch<Contract>,
 }
 
@@ -354,7 +551,7 @@ where
     R: Send,
     Contract: cuda_core::KernelLaunchContract,
 {
-    launch: cuda_async::launch::OwnedAsyncKernelLaunch<R>,
+    launch: cuda_async::simt::launch::OwnedAsyncKernelLaunch<R>,
     prepared: cuda_core::PreparedLaunch<Contract>,
 }
 
@@ -380,7 +577,7 @@ where
 #[doc(hidden)]
 #[cfg(feature = "async")]
 pub unsafe fn new_prepared_async_kernel_launch<'a, Contract>(
-    launch: cuda_async::launch::AsyncKernelLaunch<'a>,
+    launch: cuda_async::simt::launch::AsyncKernelLaunch<'a>,
     prepared: cuda_core::PreparedLaunch<Contract>,
 ) -> PreparedAsyncKernelLaunch<'a, Contract>
 where
@@ -398,7 +595,7 @@ where
 #[doc(hidden)]
 #[cfg(feature = "async")]
 pub unsafe fn new_prepared_owned_async_kernel_launch<R, Contract>(
-    launch: cuda_async::launch::OwnedAsyncKernelLaunch<R>,
+    launch: cuda_async::simt::launch::OwnedAsyncKernelLaunch<R>,
     prepared: cuda_core::PreparedLaunch<Contract>,
 ) -> PreparedOwnedAsyncKernelLaunch<R, Contract>
 where
@@ -409,7 +606,7 @@ where
 }
 
 #[cfg(feature = "async")]
-impl<'a, Contract> cuda_async::device_operation::DeviceOperation
+impl<'a, Contract> cuda_async::simt::device_operation::DeviceOperation
     for PreparedAsyncKernelLaunch<'a, Contract>
 where
     Contract: cuda_core::KernelLaunchContract,
@@ -418,12 +615,14 @@ where
 
     unsafe fn execute(
         self,
-        context: &cuda_async::device_operation::ExecutionContext,
-    ) -> Result<(), cuda_async::error::DeviceError> {
+        context: &cuda_async::simt::device_operation::ExecutionContext,
+    ) -> Result<(), cuda_async::simt::error::DeviceError> {
         self.prepared
             .validate_stream(context.get_cuda_stream())
-            .map_err(|error| cuda_async::error::DeviceError::Launch(error.to_string()))?;
-        unsafe { cuda_async::device_operation::DeviceOperation::execute(self.launch, context) }
+            .map_err(|error| cuda_async::simt::error::DeviceError::Launch(error.to_string()))?;
+        unsafe {
+            cuda_async::simt::device_operation::DeviceOperation::execute(self.launch, context)
+        }
     }
 }
 
@@ -432,21 +631,23 @@ impl<'a, Contract> IntoFuture for PreparedAsyncKernelLaunch<'a, Contract>
 where
     Contract: cuda_core::KernelLaunchContract,
 {
-    type Output = Result<(), cuda_async::error::DeviceError>;
-    type IntoFuture = cuda_async::device_future::DeviceFuture<(), Self>;
+    type Output = Result<(), cuda_async::simt::error::DeviceError>;
+    type IntoFuture = cuda_async::simt::device_future::DeviceFuture<(), Self>;
 
     fn into_future(self) -> Self::IntoFuture {
-        match cuda_async::device_context::with_default_device_policy(|policy| {
-            cuda_async::scheduling_policies::SchedulingPolicy::schedule(policy, self)
+        match cuda_async::simt::device_context::with_default_device_policy(|policy| {
+            cuda_async::simt::scheduling_policies::SchedulingPolicy::schedule(policy, self)
         }) {
             Ok(Ok(future)) => future,
-            Ok(Err(error)) | Err(error) => cuda_async::device_future::DeviceFuture::failed(error),
+            Ok(Err(error)) | Err(error) => {
+                cuda_async::simt::device_future::DeviceFuture::failed(error)
+            }
         }
     }
 }
 
 #[cfg(feature = "async")]
-impl<R, Contract> cuda_async::device_operation::DeviceOperation
+impl<R, Contract> cuda_async::simt::device_operation::DeviceOperation
     for PreparedOwnedAsyncKernelLaunch<R, Contract>
 where
     R: Send + 'static,
@@ -456,12 +657,14 @@ where
 
     unsafe fn execute(
         self,
-        context: &cuda_async::device_operation::ExecutionContext,
-    ) -> Result<R, cuda_async::error::DeviceError> {
+        context: &cuda_async::simt::device_operation::ExecutionContext,
+    ) -> Result<R, cuda_async::simt::error::DeviceError> {
         self.prepared
             .validate_stream(context.get_cuda_stream())
-            .map_err(|error| cuda_async::error::DeviceError::Launch(error.to_string()))?;
-        unsafe { cuda_async::device_operation::DeviceOperation::execute(self.launch, context) }
+            .map_err(|error| cuda_async::simt::error::DeviceError::Launch(error.to_string()))?;
+        unsafe {
+            cuda_async::simt::device_operation::DeviceOperation::execute(self.launch, context)
+        }
     }
 }
 
@@ -471,15 +674,17 @@ where
     R: Send + 'static,
     Contract: cuda_core::KernelLaunchContract,
 {
-    type Output = Result<R, cuda_async::error::DeviceError>;
-    type IntoFuture = cuda_async::device_future::DeviceFuture<R, Self>;
+    type Output = Result<R, cuda_async::simt::error::DeviceError>;
+    type IntoFuture = cuda_async::simt::device_future::DeviceFuture<R, Self>;
 
     fn into_future(self) -> Self::IntoFuture {
-        match cuda_async::device_context::with_default_device_policy(|policy| {
-            cuda_async::scheduling_policies::SchedulingPolicy::schedule(policy, self)
+        match cuda_async::simt::device_context::with_default_device_policy(|policy| {
+            cuda_async::simt::scheduling_policies::SchedulingPolicy::schedule(policy, self)
         }) {
             Ok(Ok(future)) => future,
-            Ok(Err(error)) | Err(error) => cuda_async::device_future::DeviceFuture::failed(error),
+            Ok(Err(error)) | Err(error) => {
+                cuda_async::simt::device_future::DeviceFuture::failed(error)
+            }
         }
     }
 }
@@ -487,7 +692,7 @@ where
 #[doc(hidden)]
 #[cfg(feature = "async")]
 pub fn set_async_kernel_cluster_dim(
-    launch: &mut cuda_async::launch::AsyncKernelLaunchBuilder<'_>,
+    launch: &mut cuda_async::simt::launch::AsyncKernelLaunchBuilder<'_>,
     cluster_dim: (u32, u32, u32),
 ) {
     launch.set_cluster_dim(cluster_dim);
@@ -496,7 +701,7 @@ pub fn set_async_kernel_cluster_dim(
 #[doc(hidden)]
 #[cfg(feature = "async")]
 pub fn set_async_kernel_cooperative(
-    launch: &mut cuda_async::launch::AsyncKernelLaunchBuilder<'_>,
+    launch: &mut cuda_async::simt::launch::AsyncKernelLaunchBuilder<'_>,
     cooperative: bool,
 ) {
     launch.set_cooperative(cooperative);
@@ -505,7 +710,7 @@ pub fn set_async_kernel_cooperative(
 #[doc(hidden)]
 #[cfg(feature = "async")]
 pub fn push_async_kernel_scalar<'a, T: KernelScalar + 'a>(
-    launch: &mut cuda_async::launch::AsyncKernelLaunchBuilder<'a>,
+    launch: &mut cuda_async::simt::launch::AsyncKernelLaunchBuilder<'a>,
     value: T,
 ) {
     if std::mem::size_of::<T>() != 0 {
@@ -513,28 +718,96 @@ pub fn push_async_kernel_scalar<'a, T: KernelScalar + 'a>(
     }
 }
 
+/// Add a read-only slice packet after checking its actual device alignment.
+///
+/// # Panics
+///
+/// Panics before adding the packet if a nonzero byte extent has a null device
+/// pointer or is not aligned for `B::Elem`. The lazy launch is not enqueued.
 #[doc(hidden)]
 #[cfg(feature = "async")]
+#[track_caller]
 pub fn push_async_read_only_device_slice<B>(
-    launch: &mut cuda_async::launch::AsyncKernelLaunchBuilder<'_>,
+    launch: &mut cuda_async::simt::launch::AsyncKernelLaunchBuilder<'_>,
     buffer: &B,
 ) where
     B: KernelSliceArg + ?Sized,
 {
-    launch.push_scalar_arg(buffer.cu_deviceptr());
-    launch.push_scalar_arg(buffer.len() as u64);
+    let len = buffer.len();
+    launch.push_scalar_arg(kernel_slice_device_ptr::<B::Elem>(
+        buffer.cu_deviceptr(),
+        len,
+    ));
+    launch.push_scalar_arg(len as u64);
 }
 
+/// Add a writable slice packet after checking its actual device alignment.
+///
+/// # Panics
+///
+/// Panics before adding the packet if a nonzero byte extent has a null device
+/// pointer or is not aligned for `B::Elem`. The lazy launch is not enqueued.
 #[doc(hidden)]
 #[cfg(feature = "async")]
+#[track_caller]
 pub fn push_async_writable_device_slice<B>(
-    launch: &mut cuda_async::launch::AsyncKernelLaunchBuilder<'_>,
+    launch: &mut cuda_async::simt::launch::AsyncKernelLaunchBuilder<'_>,
     buffer: &mut B,
 ) where
     B: KernelSliceArgMut + ?Sized,
 {
-    launch.push_scalar_arg(buffer.cu_deviceptr());
-    launch.push_scalar_arg(buffer.len() as u64);
+    let len = buffer.len();
+    launch.push_scalar_arg(kernel_slice_device_ptr::<B::Elem>(
+        buffer.cu_deviceptr(),
+        len,
+    ));
+    launch.push_scalar_arg(len as u64);
+}
+
+/// Pushes a row-width device slice as three async kernel arguments.
+///
+/// Matches the `{ ptr, len, space }` layout of a device-side `DisjointSlice`
+/// whose index space carries a runtime row width.
+///
+/// # Panics
+///
+/// Panics before adding the packet if its address fails
+/// [`row_width_device_buffer_arg`]'s alignment or nullness check.
+#[doc(hidden)]
+#[cfg(feature = "async")]
+#[track_caller]
+pub fn push_async_row_width_device_slice<T>(
+    launch: &mut cuda_async::simt::launch::AsyncKernelLaunchBuilder<'_>,
+    bound: RowWidth<'_, T>,
+) {
+    let (ptr, len, width) = row_width_device_buffer_arg(bound);
+    launch.push_scalar_arg(ptr);
+    launch.push_scalar_arg(len);
+    launch.push_scalar_arg(width);
+}
+
+/// Pushes an owned row-width device slice as three async kernel arguments.
+///
+/// # Panics
+///
+/// Panics before adding the packet if a nonzero byte extent has a null device
+/// pointer or is not aligned for `B::Elem`. The lazy launch is not enqueued.
+#[doc(hidden)]
+#[cfg(feature = "async")]
+#[track_caller]
+pub fn push_async_owned_row_width_device_slice<B>(
+    launch: &mut cuda_async::simt::launch::AsyncKernelLaunchBuilder<'_>,
+    bound: &mut RowWidthOwned<B>,
+) where
+    B: KernelSliceArgMut,
+{
+    let len = bound.buffer.len();
+    launch.push_scalar_arg(kernel_slice_device_ptr::<B::Elem>(
+        bound.buffer.cu_deviceptr(),
+        len,
+    ));
+    launch.push_scalar_arg(len as u64);
+    launch.push_scalar_arg(bound.width);
 }
 
 #[doc(hidden)]
@@ -542,15 +815,15 @@ pub fn push_async_writable_device_slice<B>(
 pub fn load_cuda_module_from_async_context<F, R>(
     device_id: usize,
     f: F,
-) -> Result<R, cuda_async::error::DeviceError>
+) -> Result<R, cuda_async::simt::error::DeviceError>
 where
     F: FnOnce(&Arc<cuda_core::CudaContext>) -> Result<R, crate::EmbeddedModuleError>,
 {
-    cuda_async::device_context::with_cuda_context(device_id, |ctx| f(ctx))?.map_err(|error| {
+    cuda_async::simt::device_context::with_cuda_context(device_id, |ctx| f(ctx))?.map_err(|error| {
         if let crate::EmbeddedModuleError::Driver(error) = error {
-            cuda_async::error::DeviceError::Driver(error)
+            cuda_async::simt::error::DeviceError::Driver(error)
         } else {
-            cuda_async::error::DeviceError::KernelCache(error.to_string())
+            cuda_async::simt::error::DeviceError::KernelCache(error.to_string())
         }
     })
 }
@@ -563,10 +836,10 @@ where
 pub fn load_kernel_module_async(
     name: &str,
     device_id: usize,
-) -> Result<Arc<cuda_core::CudaModule>, cuda_async::error::DeviceError> {
-    cuda_async::device_context::with_cuda_context(device_id, |ctx| {
+) -> Result<Arc<cuda_core::CudaModule>, cuda_async::simt::error::DeviceError> {
+    cuda_async::simt::device_context::with_cuda_context(device_id, |ctx| {
         crate::ltoir::load_kernel_module(ctx, name)
-            .map_err(|error| cuda_async::error::DeviceError::KernelCache(error.to_string()))
+            .map_err(|error| cuda_async::simt::error::DeviceError::KernelCache(error.to_string()))
     })?
 }
 
@@ -730,6 +1003,68 @@ mod tests {
 
         assert_eq!(args.len(), 1);
         assert_eq!(unsafe { *(args[0] as *const *const f32) }, ptr);
+    }
+
+    #[repr(align(32))]
+    struct AlignedZst;
+
+    #[repr(align(8192))]
+    struct AlignedValue {
+        _value: u8,
+    }
+
+    #[test]
+    fn test_kernel_slice_device_ptr_preserves_nonzero_extent_pointer() {
+        let ptr: cuda_core::sys::CUdeviceptr = 0x1000;
+
+        assert_eq!(kernel_slice_device_ptr::<u32>(ptr, 4), ptr);
+    }
+
+    #[test]
+    fn test_kernel_slice_device_ptr_preserves_proven_overalignment() {
+        // These are packet metadata only: no address is dereferenced and no
+        // device allocation or Rust reference is constructed.
+        let ptr = 0x1_0000;
+        assert_eq!(kernel_slice_device_ptr::<AlignedValue>(ptr, 2), ptr);
+    }
+
+    #[test]
+    #[should_panic(expected = "nonempty kernel slice has a null device pointer")]
+    fn test_kernel_slice_device_ptr_rejects_nonempty_null() {
+        kernel_slice_device_ptr::<u32>(0, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "does not satisfy the 8192-byte alignment")]
+    fn test_kernel_slice_device_ptr_rejects_insufficient_allocation_alignment() {
+        // This address satisfies CUDA's minimum alignment, but not the Rust
+        // element type's stronger requirement. Reject before making a packet.
+        kernel_slice_device_ptr::<AlignedValue>(0x1000, 1);
+    }
+
+    #[test]
+    fn test_kernel_slice_device_ptr_empty_overaligned_value_needs_no_allocation() {
+        assert_eq!(kernel_slice_device_ptr::<AlignedValue>(0, 0), 8192);
+    }
+
+    #[test]
+    fn test_kernel_slice_device_ptr_normalizes_empty_slice() {
+        let ptr = kernel_slice_device_ptr::<u32>(0, 0);
+        let align = std::mem::align_of::<u32>() as cuda_core::sys::CUdeviceptr;
+
+        assert_ne!(ptr, 0);
+        assert_eq!(ptr, align);
+        assert_eq!(ptr % align, 0);
+    }
+
+    #[test]
+    fn test_kernel_slice_device_ptr_normalizes_overaligned_zst() {
+        let ptr = kernel_slice_device_ptr::<AlignedZst>(0, 8);
+        let align = std::mem::align_of::<AlignedZst>() as cuda_core::sys::CUdeviceptr;
+
+        assert_ne!(ptr, 0);
+        assert_eq!(ptr, align);
+        assert_eq!(ptr % align, 0);
     }
 
     #[test]

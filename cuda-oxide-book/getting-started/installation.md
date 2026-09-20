@@ -9,10 +9,17 @@ This section walks through everything you need to get `cargo oxide run vecadd` w
 | Requirement      | Version             | Notes                                                         |
 |------------------|---------------------|---------------------------------------------------------------|
 | **Linux**        | Ubuntu 24.04 tested | Other distros may work but are untested                       |
-| **NVIDIA GPU**   | Ampere+ (sm_80+)    | Driver 545+ recommended                                       |
-| **CUDA Toolkit** | 12.x+               | `nvcc` and `cuda.h` must be available                         |
+| **NVIDIA GPU**   | Ampere+ (sm_80+)    | Driver 580+ (a CUDA 13.x driver; loaded at run time)          |
+| **CUDA Toolkit** | 13.0+               | `nvcc`, `cuda.h` and `curand.h` must be available             |
 | **LLVM**         | 21+                 | Must include the NVPTX backend                                |
 | **Clang**        | 21+                 | `clang-21` — needed by `bindgen` for host `cuda-bindings`     |
+
+The host runtime does not link `libcuda` at build time. The shared
+`cuda-bindings` crate loads it at the first driver call, so a binary starts
+without a driver and fails on that call with `CUDA_ERROR_NOT_INITIALIZED`; the
+error message names the library files the loader tried. A driver whose CUDA
+major version is older than the toolkit's (a 12.x driver with a 13.x build)
+fails the same way with a "driver too old" message.
 | **Rust**         | Nightly (pinned)    | Pinned in `rust-toolchain.toml`                               |
 
 :::{note}
@@ -31,7 +38,7 @@ installed.
 The host does not need the CUDA Toolkit installed. It does need:
 
 - an NVIDIA GPU
-- an NVIDIA driver compatible with CUDA 13.0
+- an NVIDIA driver compatible with CUDA 13.0 (R580 or newer)
 - Docker with the NVIDIA Container Toolkit installed
 
 With a devcontainer-aware editor, open the repository and choose "Reopen in
@@ -186,7 +193,7 @@ llc-21 --version | grep nvptx
 ```
 
 You should see a line containing `nvptx64` in the registered targets. The
-pipeline auto-discovers `llc-22` and `llc-21` in that order; pin a specific
+pipeline auto-discovers `llc-23`, `llc-22`, and `llc-21` in that order; pin a specific
 binary with `CUDA_OXIDE_LLC=/usr/bin/llc-21` if needed.
 
 :::{warning}
@@ -239,28 +246,30 @@ The workspace ships a `rust-toolchain.toml` that pins the exact nightly version 
 If you need to install it manually:
 
 ```bash
-rustup toolchain install nightly-2026-04-03
-rustup component add rust-src rustc-dev rust-analyzer llvm-tools --toolchain nightly-2026-04-03
+rustup toolchain install nightly-2026-08-28
+rustup component add rust-src rustc-dev rust-analyzer clippy rustfmt llvm-tools --toolchain nightly-2026-08-28
 ```
 
-These components are required by the codegen backend and doctor:
+Three of these components are what the codegen backend and doctor need:
 
 - `rust-src` -- source of the Rust standard library, needed for cross-compiling to the NVPTX target.
 - `rustc-dev` -- compiler internals that the backend links against.
 - `llvm-tools` -- toolchain-bundled `llc` used to lower LLVM IR to PTX (doctor's floor check).
 
+The other three are not needed to build: `rust-analyzer` powers IDE support, `clippy` is the lint gate CI runs, and `rustfmt` backs `cargo oxide fmt`.
+
 ---
 
 ## cargo-oxide
 
-`cargo-oxide` is the cargo subcommand that drives the entire build pipeline (`cargo oxide run`, `build`, `debug`, `pipeline`, etc.).
+`cargo-oxide` is the cargo subcommand that drives the entire build pipeline (`cargo oxide run`, `build`, `debug`, `pipeline`, and the rest -- the Command reference at the end of this section lists all of them).
 
 **Inside the cuda-oxide repo**, it works out of the box via a workspace alias -- no extra install step.
 
 **For use outside the repo** (your own projects), install it with the pinned nightly toolchain:
 
 ```bash
-cargo +nightly-2026-04-03 install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
+cargo +nightly-2026-08-28 install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 
 On first run, `cargo-oxide` will automatically fetch and build the codegen backend. Subsequent runs reuse the cached build.
@@ -289,6 +298,55 @@ cargo oxide clean
 `inspect` is the lightweight counterpart to `cargo oxide pipeline`. `clean`
 only touches project-local outputs; it leaves the shared backend cache at
 `~/.cargo/cuda-oxide/` alone.
+
+### Command reference
+
+The full set, as `cargo oxide --help` reports it:
+
+| Command | Description |
+|---------|-------------|
+| `run` | Build and run an example or project |
+| `sanitize` | Build and run an example or project under NVIDIA Compute Sanitizer |
+| `build` | Build an example or project (compile only, don't run) |
+| `fuzz-schedule` | Find schedule-sensitive failures by perturbing an example's generated PTX |
+| `test` | Run Cargo tests through the cuda-oxide backend |
+| `emit-ltoir` | Compile a crate's device code to a binary LTOIR artifact in one step |
+| `pipeline` | Show the full compilation pipeline (MIR -> PTX/NVVM IR) with verbose output |
+| `debug` | Build with debug info and launch `cuda-gdb` |
+| `list` | List the examples bundled with the cuda-oxide workspace |
+| `inspect` | Build an example or project and print the generated PTX |
+| `fmt` | Format all crates (root workspace, codegen backend, examples) |
+| `new` | Scaffold a new standalone cuda-oxide project |
+| `clean` | Remove project-local build outputs and generated cuda-oxide artifacts |
+| `doctor` | Check that your environment is set up correctly |
+| `setup` | Build and cache the codegen backend |
+| `update` | Refresh the cached codegen backend (or run `setup` inside the workspace) |
+
+Four of these are worth calling out, because they do something `cargo` itself
+cannot:
+
+```bash
+# Run the test suite with device code compiled by the cuda-oxide backend.
+# Arguments after `--` go to cargo; with none it is a plain `cargo test`.
+cargo oxide test -- --lib
+
+# Format every scope the fmt CI gate checks: the root workspace, the codegen
+# backend, the cuda-macros device-only fixture, and every manifest under
+# examples/ including nested ones. Each is its own [workspace], so a single
+# `cargo fmt` at the root misses most of them.
+cargo oxide fmt
+cargo oxide fmt --check
+
+# Rebuild the cached backend after changing compiler crates or the toolchain
+# pin. Inside the workspace this advises `setup`; --force runs it.
+cargo oxide update
+
+# Produce the LTOIR a tile or C++ kernel links against. LTOIR is
+# architecture-specific, so --arch is required rather than inferred.
+cargo oxide emit-ltoir my_kernels --arch sm_90
+```
+
+Every command takes `--help`, which lists the flags each one accepts.
 
 ---
 
@@ -322,8 +380,8 @@ If everything is configured correctly, this compiles a Rust kernel to PTX, launc
 :::{tip}
 **Common issues:**
 
-- `No working llc-21 or llc-22 found on PATH` -- prefer `rustup component add llvm-tools --toolchain nightly-2026-04-03`, or install LLVM 21+ (`sudo apt install llvm-21`), add `/usr/lib/llvm-21/bin` to your `PATH`, or set `CUDA_OXIDE_LLC=/usr/bin/llc-21`.
+- `No working llc found` -- prefer `rustup component add llvm-tools --toolchain nightly-2026-08-28`, or install LLVM 21+ (`sudo apt install llvm-21`), add `/usr/lib/llvm-21/bin` to your `PATH`, or set `CUDA_OXIDE_LLC=/usr/bin/llc-21`.
 - `'stddef.h' file not found` when building host `cuda-bindings` -- install clang dev headers: `sudo apt install clang-21` (or `libclang-common-21-dev`).
 - `cuda.h not found` -- Set `CUDA_TOOLKIT_PATH` to your CUDA install root, or ensure `/usr/local/cuda/include/cuda.h` exists.
-- `rust-src` / `llvm-tools` component missing -- Run `rustup component add rust-src llvm-tools --toolchain nightly-2026-04-03`.
+- `rust-src` / `llvm-tools` component missing -- Run `rustup component add rust-src llvm-tools --toolchain nightly-2026-08-28`.
 :::

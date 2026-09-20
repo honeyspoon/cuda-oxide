@@ -12,7 +12,8 @@
 //!
 //! Run: cargo oxide run f16_stress
 
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, DeviceBuffer};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_module;
 
@@ -59,8 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ctx = CudaContext::new(0)?;
     let stream = ctx.default_stream();
-    let module = ctx.load_module_from_file("f16_stress.ptx")?;
-    let module = kernels::from_module(module)?;
+    let module = kernels::load(&ctx)?;
     let cfg = LaunchConfig::for_num_elems(1);
 
     let mut passed = 0u32;

@@ -17,7 +17,8 @@
 //! Build and run with:
 //!   cargo oxide run cp_async_zfill
 
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_core::simt::LaunchConfig;
+use cuda_core::{CudaContext, DeviceBuffer};
 use cuda_device::async_copy::{cp_async_ca_zfill_4, cp_async_commit_group, cp_async_wait_all};
 use cuda_device::{DisjointSlice, SharedArray, cuda_module, kernel, thread};
 
@@ -76,7 +77,7 @@ fn main() {
     let (major, minor) = ctx.compute_capability().expect("compute capability");
     if major < 8 {
         println!(
-            "Skipping: cp.async requires sm_80+, device is sm_{}{} -- PASS (skipped)",
+            "skipping: cp.async requires sm_80+ (device is sm_{}{})",
             major, minor
         );
         return;

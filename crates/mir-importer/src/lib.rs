@@ -21,7 +21,7 @@
 //! ┌─────────────────────── mir-importer ──────────────────────────────────┐
 //! │                                                                       │
 //! │  ┌──────────────┐   ┌─────────────────────────────────────────────┐   │
-//! │  │  translator  │──▶│          cuda-oxide-codegen               │   │
+//! │  │  translator  │──▶│          cuda-oxide-codegen                 │   │
 //! │  │              │   │                                             │   │
 //! │  │     MIR      │   │  dialect-mir (alloca)                       │   │
 //! │  │      ──▶     │   │    ──▶ mem2reg                              │   │
@@ -38,7 +38,7 @@
 //!
 //! | Module         | Purpose                                                     |
 //! |----------------|-------------------------------------------------------------|
-//! | [`translator`] | MIR → `dialect-mir` (alloca + load/store)                   |
+//! | `translator`   | MIR → `dialect-mir` (alloca + load/store); crate-internal   |
 //! | [`pipeline`]   | Translate a module, then call the shared codegen backend    |
 //! | [`error`]      | Error types integrated with pliron's error system           |
 //!
@@ -48,17 +48,26 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use pliron::context::Context;
-//! use rustc_public::mir::mono::Instance;
+//! use mir_importer::{CollectedFunction, PipelineConfig, run_pipeline};
 //!
-//! // Inside rustc callback:
-//! let body = instance.body().unwrap();
-//! let mut ctx = Context::new();
+//! // Inside a rustc callback, once collection has the monomorphized set:
+//! let functions: Vec<CollectedFunction> = collect_device_functions();
 //!
-//! let module_op = mir_importer::translator::translate_function(
-//!     &mut ctx, &body, &instance, /* is_kernel */ true
+//! let result = run_pipeline(
+//!     &functions,
+//!     &[], // device externs
+//!     &PipelineConfig {
+//!         output_dir: out.to_path_buf(),
+//!         output_name: "kernel".to_string(),
+//!         ..PipelineConfig::default()
+//!     },
+//!     known_defs, // lang-item DefIds resolved by the driver (KnownDefs)
 //! )?;
 //! ```
+//!
+//! `run_pipeline` owns the whole run: it registers the dialects, translates
+//! every collected body into one module, and hands that module to the shared
+//! backend. The translator is reached through it rather than called directly.
 //!
 //! # Alloca + load/store model
 //!
@@ -86,12 +95,20 @@ pub const DEVICE_RUNTIME_CHECKS_VALUE: bool = false;
 
 pub mod error;
 pub mod pipeline;
-pub mod translator;
+// Crate-internal: every caller reaches the translator through `pipeline`, and
+// the handful of predicates outsiders need are re-exported below. Keeping the
+// module public would also keep `dead_code` switched off for the whole tree
+// under it, since every item in it would count as reachable API.
+pub(crate) mod translator;
 
 pub use error::{TranslationErr, TranslationResult};
 pub use pipeline::{
-    CollectedFunction, CompilationArtifactKind, CompilationResult, DeviceExternAttrs,
-    DeviceExternDecl, DeviceExternType, PipelineConfig, PipelineError, run_pipeline,
+    CollectedFunction, CompilationArtifactKind, CompilationResult, DebugGlobalVariableIdentity,
+    DeviceExternAttrs, DeviceExternDecl, DeviceExternType, KernelLaunchBounds, PipelineConfig,
+    PipelineError, StatementDebugInfo, StatementDebugInfoBlock, StatementDebugInfoMap,
+    build_debug_global_variable_info, build_debug_shared_array_variable_info,
+    device_static_global_key, run_pipeline,
 };
+pub use translator::facts::KnownDefs;
 pub use translator::terminator::drop_glue::{drop_glue_is_noop, drop_instance_is_noop};
 pub use translator::terminator::is_panic_entry_path;
